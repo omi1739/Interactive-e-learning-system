@@ -11,8 +11,18 @@ $conn = $db->getConnection();
 // Get instructor's courses
 $courses = $functions->getCourses($_SESSION['user_id']);
 
-$selected_course = $_GET['course_id'] ?? null;
+// Ids of the courses this instructor actually owns. Every course_id coming
+// from the request is checked against this list, otherwise any teacher could
+// pass another teacher's course_id and read their student roster.
+$my_course_ids = array_map('intval', array_column($courses, 'course_id'));
+
+$selected_course = intval($_GET['course_id'] ?? 0);
 $course_students = [];
+
+if($selected_course && !in_array($selected_course, $my_course_ids, true)) {
+    $_SESSION['error'] = "You do not have access to that course.";
+    $selected_course = 0;
+}
 
 if($selected_course) {
     $course_students = $functions->getCourseStudents($selected_course);
@@ -20,16 +30,27 @@ if($selected_course) {
 
 // Handle enrollment status update
 if($_POST && isset($_POST['update_status'])) {
-    $user_id = $_POST['user_id'];
-    $course_id = $_POST['course_id'];
-    $status = $_POST['status'];
-    
-    if($functions->updateEnrollmentStatus($user_id, $course_id, $status)) {
-        $success = "Enrollment status updated successfully!";
-        // Refresh students list
-        $course_students = $functions->getCourseStudents($selected_course);
+    verify_csrf();
+    $user_id = intval($_POST['user_id'] ?? 0);
+    $course_id = intval($_POST['course_id'] ?? 0);
+    $status = $_POST['status'] ?? '';
+
+    $allowed_statuses = ['pending', 'approved', 'rejected', 'completed'];
+
+    if(!in_array($course_id, $my_course_ids, true)) {
+        $_SESSION['error'] = "You can only manage students in your own courses.";
+    } elseif(!in_array($status, $allowed_statuses, true)) {
+        $_SESSION['error'] = "Invalid enrollment status.";
+    } elseif($user_id <= 0) {
+        $_SESSION['error'] = "Invalid student.";
     } else {
-        $error = "Failed to update enrollment status.";
+        if($functions->updateEnrollmentStatus($user_id, $course_id, $status)) {
+            $success = "Enrollment status updated successfully!";
+            // Refresh students list
+            $course_students = $functions->getCourseStudents($selected_course);
+        } else {
+            $error = "Failed to update enrollment status.";
+        }
     }
 }
 
@@ -41,11 +62,11 @@ require_once '../includes/header.php';
 </div>
 
 <?php if(isset($success)): ?>
-<div class="alert alert-success"><?php echo $success; ?></div>
+<div class="alert alert-success"><?php echo e($success); ?></div>
 <?php endif; ?>
 
 <?php if(isset($error)): ?>
-<div class="alert alert-danger"><?php echo $error; ?></div>
+<div class="alert alert-danger"><?php echo e($error); ?></div>
 <?php endif; ?>
 
 <div class="row">
@@ -63,8 +84,8 @@ require_once '../includes/header.php';
                         <?php foreach($courses as $course): ?>
                         <a href="students.php?course_id=<?php echo $course['course_id']; ?>" 
                            class="list-group-item list-group-item-action <?php echo $selected_course == $course['course_id'] ? 'active' : ''; ?>">
-                            <?php echo $course['title']; ?>
-                            <small class="d-block text-muted"><?php echo $course['course_code']; ?></small>
+                            <?php echo e($course['title']); ?>
+                            <small class="d-block text-muted"><?php echo e($course['course_code']); ?></small>
                         </a>
                         <?php endforeach; ?>
                     </div>
@@ -86,7 +107,7 @@ require_once '../includes/header.php';
                             return $c['course_id'] == $selected_course;
                         });
                         $current_course = reset($current_course);
-                        echo "Students - " . ($current_course['title'] ?? 'Unknown Course');
+                        echo "Students - " . e($current_course['title'] ?? 'Unknown Course');
                     } else {
                         echo "Students";
                     }
@@ -133,14 +154,18 @@ require_once '../includes/header.php';
                                         </td>
                                         <td>
                                             <form method="POST" class="d-inline">
+                                                <?php echo csrf_field(); ?>
                                                 <input type="hidden" name="user_id" value="<?php echo $student['user_id']; ?>">
                                                 <input type="hidden" name="course_id" value="<?php echo $selected_course; ?>">
                                                 <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
                                                     <option value="pending" <?php echo $student['enrollment_status'] == 'pending' ? 'selected' : ''; ?>>Pending</option>
                                                     <option value="approved" <?php echo $student['enrollment_status'] == 'approved' ? 'selected' : ''; ?>>Approved</option>
                                                     <option value="rejected" <?php echo $student['enrollment_status'] == 'rejected' ? 'selected' : ''; ?>>Rejected</option>
+                                                    <option value="completed" <?php echo $student['enrollment_status'] == 'completed' ? 'selected' : ''; ?>>Completed</option>
                                                 </select>
-                                                <button type="submit" name="update_status" class="d-none">Update</button>
+                                                <?php // A programmatic this.form.submit() does not send a
+                                                      // submit button's name, so flag the action here. ?>
+                                                <input type="hidden" name="update_status" value="1">
                                             </form>
                                         </td>
                                     </tr>

@@ -5,296 +5,145 @@ if(!$auth->isLoggedIn()) {
     $auth->redirect('login.php');
 }
 
+$role = $_SESSION['role'] ?? 'student';
+
+// Clean redirection for student and instructor to their dedicated specialized dashboards
+if($role === 'instructor') {
+    $auth->redirect('instructor/dashboard.php');
+} elseif($role === 'student') {
+    $auth->redirect('student/dashboard.php');
+}
+
+// Admin Dashboard view
+$conn = $db->getConnection();
+$total_users = $functions->getTotalUsers();
+$total_courses = $functions->getTotalCourses();
+$pending_enrollments = $functions->getPendingEnrollments();
+
+// Total submissions and reviews
+$stmt = $conn->query("SELECT COUNT(*) as cnt FROM submissions");
+$total_submissions = $stmt->fetch(PDO::FETCH_ASSOC)['cnt'] ?? 0;
+
+$stmt = $conn->query("SELECT COUNT(*) as cnt FROM peer_reviews");
+$total_reviews = $stmt->fetch(PDO::FETCH_ASSOC)['cnt'] ?? 0;
+
+// Recent users list
+$users = $functions->getAllUsers();
+
 require_once 'includes/header.php';
 ?>
 
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <h1 class="h2">Dashboard</h1>
+    <div>
+        <h1 class="h2">Administrator Dashboard</h1>
+        <p class="text-muted mb-0">System-wide overview and administrative control</p>
+    </div>
+    <div class="btn-toolbar mb-2 mb-md-0 gap-2">
+        <?php // The web installer and its "Database Tools & Reset" page were
+              // removed: they were reachable by any visitor and could drop all
+              // tables. Schema and account management now happen from the
+              // command line (see README.md). ?>
+    </div>
 </div>
 
-<?php if($_SESSION['role'] == 'student'): ?>
-<!-- Student Dashboard -->
+<!-- Admin Statistics -->
 <div class="row">
-    <div class="col-md-3">
-        <div class="card text-white bg-primary mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">
-                            <?php 
-                            $enrolled_courses = $functions->getEnrolledCourses($_SESSION['user_id']);
-                            echo count($enrolled_courses);
-                            ?>
-                        </h4>
-                        <p class="card-text">Enrolled Courses</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-book fa-2x"></i>
-                    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card text-white bg-primary shadow-sm border-0 h-100">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <h3 class="card-title fw-bold mb-0"><?php echo $total_users; ?></h3>
+                    <p class="card-text text-white-50">Total Registered Users</p>
                 </div>
+                <i class="fas fa-users fa-2x opacity-75"></i>
             </div>
         </div>
     </div>
     
-    <div class="col-md-3">
-        <div class="card text-white bg-success mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">
-                            <?php 
-                            $assignments = $functions->getStudentAssignments($_SESSION['user_id']);
-                            $pending = 0;
-                            foreach($assignments as $assignment) {
-                                if(!$assignment['submission_id']) $pending++;
-                            }
-                            echo $pending;
-                            ?>
-                        </h4>
-                        <p class="card-text">Pending Assignments</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-tasks fa-2x"></i>
-                    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card text-white bg-success shadow-sm border-0 h-100">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <h3 class="card-title fw-bold mb-0"><?php echo $total_courses; ?></h3>
+                    <p class="card-text text-white-50">Active Courses</p>
                 </div>
+                <i class="fas fa-book fa-2x opacity-75"></i>
             </div>
         </div>
     </div>
     
-    <div class="col-md-3">
-        <div class="card text-white bg-warning mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Peer Reviews</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-comments fa-2x"></i>
-                    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card text-white bg-warning shadow-sm border-0 h-100 text-dark">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <h3 class="card-title fw-bold mb-0"><?php echo $pending_enrollments; ?></h3>
+                    <p class="card-text text-dark">Pending Enrollments</p>
                 </div>
+                <i class="fas fa-clock fa-2x opacity-75"></i>
             </div>
         </div>
     </div>
     
-    <div class="col-md-3">
-        <div class="card text-white bg-info mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0%</h4>
-                        <p class="card-text">Overall Progress</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-chart-line fa-2x"></i>
-                    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card text-white bg-info shadow-sm border-0 h-100">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <h3 class="card-title fw-bold mb-0"><?php echo $total_reviews; ?></h3>
+                    <p class="card-text text-white-50">Peer Reviews Conducted</p>
                 </div>
+                <i class="fas fa-comments fa-2x opacity-75"></i>
             </div>
         </div>
     </div>
 </div>
 
-<div class="row mt-4">
-    <div class="col-md-8">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">My Courses</h5>
-            </div>
-            <div class="card-body">
-                <?php 
-                $enrolled_courses = $functions->getEnrolledCourses($_SESSION['user_id']);
-                if(count($enrolled_courses) > 0): ?>
-                    <div class="row">
-                        <?php foreach($enrolled_courses as $course): ?>
-                        <div class="col-md-6 mb-3">
-                            <div class="card course-card h-100">
-                                <div class="card-body">
-                                    <h5 class="card-title"><?php echo $course['title']; ?></h5>
-                                    <p class="card-text"><?php echo substr($course['description'] ?? 'No description', 0, 100) . '...'; ?></p>
-                                    <p class="card-text">
-                                        <small class="text-muted">
-                                            Instructor: <?php echo $course['first_name'] . ' ' . $course['last_name']; ?>
-                                        </small>
-                                    </p>
-                                    <?php if($course['enrollment_status'] == 'approved'): ?>
-                                        <a href="student/course_view.php?id=<?php echo $course['course_id']; ?>" class="btn btn-primary btn-sm">Enter Course</a>
-                                    <?php else: ?>
-                                        <span class="badge bg-warning">Pending Approval</span>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
-                <?php else: ?>
-                    <p class="text-muted">You are not enrolled in any courses yet.</p>
-                    <a href="student/courses.php" class="btn btn-primary">Browse Courses</a>
-                <?php endif; ?>
-            </div>
-        </div>
+<!-- All Users Table -->
+<div class="card shadow-sm border-0 mt-4">
+    <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0 fw-bold">
+            <i class="fas fa-user-shield text-primary me-2"></i> User Directory
+        </h5>
+        <span class="badge bg-secondary"><?php echo count($users); ?> accounts</span>
     </div>
-    
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Recent Activities</h5>
-            </div>
-            <div class="card-body">
-                <p class="text-muted">No recent activities.</p>
-            </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th class="ps-4">User</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach($users as $u): ?>
+                    <tr>
+                        <td class="ps-4">
+                            <strong><?php echo htmlspecialchars($u['first_name'] . ' ' . $u['last_name']); ?></strong>
+                            <small class="d-block text-muted">@<?php echo htmlspecialchars($u['username']); ?></small>
+                        </td>
+                        <td><code><?php echo htmlspecialchars($u['email']); ?></code></td>
+                        <td>
+                            <span class="badge bg-<?php 
+                                echo $u['role'] === 'instructor' ? 'primary' : ($u['role'] === 'admin' ? 'dark' : 'success'); 
+                            ?>">
+                                <?php echo ucfirst($u['role']); ?>
+                            </span>
+                        </td>
+                        <td>
+                            <span class="badge bg-<?php echo $u['is_active'] ? 'success' : 'danger'; ?>">
+                                <?php echo $u['is_active'] ? 'Active' : 'Disabled'; ?>
+                            </span>
+                        </td>
+                        <td><?php echo date('M j, Y', strtotime($u['created_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
-
-<?php elseif($_SESSION['role'] == 'instructor'): ?>
-<!-- Instructor Dashboard -->
-<div class="row">
-    <div class="col-md-3">
-        <div class="card text-white bg-primary mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">
-                            <?php 
-                            $my_courses = $functions->getCourses($_SESSION['user_id']);
-                            echo count($my_courses);
-                            ?>
-                        </h4>
-                        <p class="card-text">My Courses</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-book fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-success mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">
-                            <?php 
-                            $total_students = 0;
-                            foreach($my_courses as $course) {
-                                $students = $functions->getCourseStudents($course['course_id']);
-                                $total_students += count($students);
-                            }
-                            echo $total_students;
-                            ?>
-                        </h4>
-                        <p class="card-text">Total Students</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-users fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-warning mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Pending Reviews</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-comments fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-info mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Assignments</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-tasks fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<?php else: ?>
-<!-- Admin Dashboard -->
-<div class="row">
-    <div class="col-md-3">
-        <div class="card text-white bg-primary mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Total Users</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-users fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-success mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Total Courses</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-book fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-warning mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Pending Enrollments</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-user-plus fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-info mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title">0</h4>
-                        <p class="card-text">Active Sessions</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-chart-line fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-<?php endif; ?>
 
 <?php require_once 'includes/footer.php'; ?>

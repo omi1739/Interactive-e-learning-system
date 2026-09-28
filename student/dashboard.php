@@ -174,7 +174,7 @@ require_once '../includes/header.php';
                                     <div class="card-body">
                                         <h6 class="card-title"><?php echo htmlspecialchars($course['title']); ?></h6>
                                         <p class="card-text small text-muted">
-                                            <?php echo substr($course['description'] ?? 'No description', 0, 80) . '...'; ?>
+                                            <?php echo e(substr($course['description'] ?? 'No description', 0, 80) . '...'); ?>
                                         </p>
                                         <p class="card-text">
                                             <small class="text-muted">

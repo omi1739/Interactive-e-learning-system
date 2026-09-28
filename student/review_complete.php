@@ -5,13 +5,15 @@ if(!$auth->isLoggedIn() || !$auth->hasRole('student')) {
     $auth->redirect('../login.php');
 }
 
-$review_id = $_GET['id'] ?? 0;
+$review_id = intval($_GET['id'] ?? 0);
 $conn = $db->getConnection();
 
-// Get review details
-// Get review details - FIXED QUERY
+// Get review details.
+// pr.reviewer_id = ? scopes this to the signed-in reviewer, so one student
+// cannot open another student's review by guessing the id.
 $stmt = $conn->prepare("SELECT pr.*, 
                                s.submission_id, s.submission_text, s.file_path, s.file_name, s.submission_date,
+                               s.student_id as author_id,
                                a.title as assignment_title, a.assignment_id, a.max_points, a.description as assignment_description,
                                u.first_name, u.last_name, u.username,
                                c.title as course_title, c.course_id
@@ -29,6 +31,13 @@ if(!$review) {
     $auth->redirect('peer_reviews.php');
 }
 
+// A student must never review their own work.
+if((int)$review['author_id'] === (int)$_SESSION['user_id']) {
+    $_SESSION['error'] = "You cannot review your own submission.";
+    header("Location: peer_reviews.php");
+    exit();
+}
+
 // Check if review is already completed
 if($review['status'] == 'completed') {
     $_SESSION['error'] = "This review has already been completed.";
@@ -43,6 +52,7 @@ $rubrics = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle review submission
 if($_POST && isset($_POST['submit_review'])) {
+    verify_csrf();
     $overall_feedback = trim($_POST['overall_feedback']);
     
     // Validate all rubric scores are provided
@@ -119,7 +129,7 @@ require_once '../includes/header.php';
 
 <?php if(isset($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -159,7 +169,7 @@ require_once '../includes/header.php';
                 <?php if($review['file_path']): ?>
                 <div class="mb-3">
                     <label class="form-label"><strong>Submitted File:</strong></label>
-                    <a href="<?php echo htmlspecialchars($review['file_path']); ?>" target="_blank" class="btn btn-outline-primary">
+                    <a href="../download.php?submission_id=<?php echo (int)$review['submission_id']; ?>&amp;review_id=<?php echo (int)$review['review_id']; ?>" class="btn btn-outline-primary">
                         <i class="fas fa-download"></i> Download: <?php echo htmlspecialchars($review['file_name']); ?>
                     </a>
                 </div>
@@ -176,6 +186,7 @@ require_once '../includes/header.php';
 
         <!-- Review Form -->
         <form method="POST" id="reviewForm">
+            <?php echo csrf_field(); ?>
             <div class="card">
                 <div class="card-header bg-success text-white">
                     <h5 class="card-title mb-0">

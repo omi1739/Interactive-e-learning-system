@@ -173,7 +173,7 @@ require_once '../includes/header.php';
                                 <div class="card-body">
                                     <h6 class="card-title"><?php echo htmlspecialchars($course['title']); ?></h6>
                                     <p class="card-text small text-muted">
-                                        <?php echo substr($course['description'] ?? 'No description', 0, 80) . '...'; ?>
+                                        <?php echo e(substr($course['description'] ?? 'No description', 0, 80) . '...'); ?>
                                     </p>
                                     <p class="card-text">
                                         <small class="text-muted">
@@ -302,6 +302,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" action="courses.php">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="title" class="form-label">Course Title</label>

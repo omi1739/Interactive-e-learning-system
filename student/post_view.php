@@ -49,6 +49,7 @@ $replies = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle new reply
 if($_POST && isset($_POST['create_reply'])) {
+    verify_csrf();
     $content = trim($_POST['content']);
     
     if(!empty($content)) {
@@ -89,14 +90,14 @@ require_once '../includes/header.php';
 
 <?php if(isset($success)): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $success; ?>
+    <?php echo e($success); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if(isset($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -218,6 +219,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="content" class="form-label">Your Reply *</label>

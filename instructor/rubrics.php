@@ -11,7 +11,7 @@ if(!isset($_GET['assignment_id'])) {
     exit();
 }
 
-$assignment_id = $_GET['assignment_id'];
+$assignment_id = intval($_GET['assignment_id'] ?? 0);
 $conn = $db->getConnection();
 
 // Get assignment details
@@ -47,6 +47,7 @@ $rubrics = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle form actions
 if($_POST) {
+    verify_csrf();
     if(isset($_POST['add_rubric'])) {
         $criterion_name = trim($_POST['criterion_name']);
         $description = trim($_POST['description']);
@@ -96,10 +97,28 @@ if($_POST) {
             $_SESSION['error'] = "Failed to delete rubric criterion.";
         }
     } elseif(isset($_POST['reorder_rubrics'])) {
-        $order = $_POST['order'] ?? [];
-        foreach($order as $position => $rubric_id) {
-            $stmt = $conn->prepare("UPDATE rubrics SET rubric_order = ? WHERE rubric_id = ?");
-            $stmt->execute([$position, $rubric_id]);
+        // The client posts a comma-separated id list (see the JS at the bottom
+        // of this file). Accept both that and a plain array.
+        $raw_order = $_POST['order'] ?? [];
+        if(is_string($raw_order)) {
+            $raw_order = array_filter(array_map('trim', explode(',', $raw_order)), static fn($v) => $v !== '');
+        }
+        if(!is_array($raw_order)) {
+            $raw_order = [];
+        }
+
+        // Only accept ids that really belong to this assignment, and set the
+        // order from the array position (re-numbering 0..n-1 in the DB).
+        $position = 1;
+        foreach($raw_order as $rubric_id) {
+            $rubric_id = intval($rubric_id);
+            if($rubric_id <= 0) {
+                continue;
+            }
+            $stmt = $conn->prepare("UPDATE rubrics SET rubric_order = ?
+                                    WHERE rubric_id = ? AND assignment_id = ?");
+            $stmt->execute([$position, $rubric_id, $assignment_id]);
+            $position++;
         }
         $_SESSION['success'] = "Rubrics reordered successfully.";
     }
@@ -122,14 +141,14 @@ require_once '../includes/header.php';
 
 <?php if(isset($_SESSION['success'])): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $_SESSION['success']; ?>
+    <?php echo e($_SESSION['success']); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php unset($_SESSION['success']); endif; ?>
 
 <?php if(isset($_SESSION['error'])): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $_SESSION['error']; ?>
+    <?php echo e($_SESSION['error']); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php unset($_SESSION['error']); endif; ?>
@@ -143,6 +162,7 @@ require_once '../includes/header.php';
             <div class="card-body">
                 <?php if(count($rubrics) > 0): ?>
                     <form method="POST" id="reorderForm">
+                        <?php echo csrf_field(); ?>
                         <ul id="rubricsList" class="list-group">
                             <?php foreach($rubrics as $rubric): ?>
                             <li class="list-group-item d-flex justify-content-between align-items-center" data-id="<?php echo $rubric['rubric_id']; ?>">
@@ -190,6 +210,7 @@ require_once '../includes/header.php';
             </div>
             <div class="card-body">
                 <form method="POST">
+                    <?php echo csrf_field(); ?>
                     <div class="mb-3">
                         <label for="criterion_name" class="form-label">Criterion Name *</label>
                         <input type="text" class="form-control" id="criterion_name" name="criterion_name" required>
@@ -242,6 +263,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <input type="hidden" name="rubric_id" id="edit_rubric_id">
                     <div class="mb-3">
@@ -276,33 +298,39 @@ require_once '../includes/header.php';
     </div>
 </div>
 
+<?php
+// Drag-and-drop reordering needs jQuery and the jQuery UI sortable widget.
+// Bootstrap does not ship these, so they must be loaded explicitly; without
+// them the reorder feature silently does nothing.
+?>
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jquery-ui-dist@1.13.2/jquery-ui.min.js"></script>
 <script>
 // Rubric reordering
 $(document).ready(function() {
-    $('#rubricsList').sortable({
-        update: function(event, ui) {
-            var order = [];
-            $('#rubricsList li').each(function(index) {
-                order.push($(this).data('id'));
-            });
-            $('#rubricOrder').val(order.join(','));
-            $('#reorderForm').submit();
-        }
-    });
-    
+    var $list = $('#rubricsList');
+
+    if($list.length && $.fn.sortable) {
+        $list.sortable({
+            update: function() {
+                var order = [];
+                $list.find('li').each(function() {
+                    order.push($(this).data('id'));
+                });
+                $('#rubricOrder').val(order.join(','));
+                $('#reorderForm').submit();
+            }
+        });
+    }
+
     // Edit rubric modal
     $('.edit-rubric').on('click', function() {
-        var rubricId = $(this).data('id');
-        var criterionName = $(this).data('name');
-        var description = $(this).data('desc');
-        var maxScore = $(this).data('max');
-        var weight = $(this).data('weight');
-        
-        $('#edit_rubric_id').val(rubricId);
-        $('#edit_criterion_name').val(criterionName);
-        $('#edit_description').val(description);
-        $('#edit_max_score').val(maxScore);
-        $('#edit_weight').val(weight);
+        var $btn = $(this);
+        $('#edit_rubric_id').val($btn.data('id'));
+        $('#edit_criterion_name').val($btn.data('name'));
+        $('#edit_description').val($btn.data('desc'));
+        $('#edit_max_score').val($btn.data('max'));
+        $('#edit_weight').val($btn.data('weight'));
     });
 });
 </script>

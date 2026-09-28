@@ -1,8 +1,7 @@
 <?php
-require_once '../includes/auth.php';
-require_once '../includes/functions.php';
 require_once '../includes/bootstrap.php';
-if(!$auth->isLoggedIn() || $_SESSION['role'] != 'student') {
+
+if(!$auth->isLoggedIn() || !$auth->hasRole('student')) {
     $auth->redirect('../login.php');
 }
 
@@ -39,9 +38,9 @@ require_once '../includes/header.php';
 ?>
 
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <h1 class="h2"><?php echo $course['title']; ?></h1>
+    <h1 class="h2"><?php echo e($course['title']); ?></h1>
     <div class="btn-toolbar mb-2 mb-md-0">
-        <span class="badge bg-success me-2">Instructor: <?php echo $course['first_name'] . ' ' . $course['last_name']; ?></span>
+        <span class="badge bg-success me-2">Instructor: <?php echo e($course['first_name'] . ' ' . $course['last_name']); ?></span>
     </div>
 </div>
 
@@ -60,7 +59,7 @@ require_once '../includes/header.php';
                                 <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" 
                                         data-bs-target="#collapse<?php echo $module['module_id']; ?>" 
                                         aria-expanded="false" aria-controls="collapse<?php echo $module['module_id']; ?>">
-                                    Module <?php echo $index + 1; ?>: <?php echo $module['title']; ?>
+                                    Module <?php echo $index + 1; ?>: <?php echo e($module['title']); ?>
                                 </button>
                             </h2>
                             <div id="collapse<?php echo $module['module_id']; ?>" class="accordion-collapse collapse" 
@@ -78,7 +77,7 @@ require_once '../includes/header.php';
                                         <div class="d-flex justify-content-between align-items-center p-2 border-bottom">
                                             <div>
                                                 <i class="fas fa-<?php echo $lesson['content_type'] == 'video' ? 'play-circle' : ($lesson['content_type'] == 'document' ? 'file' : 'images'); ?> text-primary me-2"></i>
-                                                <?php echo $lesson['title']; ?>
+                                                <?php echo e($lesson['title']); ?>
                                                 <?php if($lesson['duration_minutes']): ?>
                                                     <small class="text-muted">(<?php echo $lesson['duration_minutes']; ?> min)</small>
                                                 <?php endif; ?>
@@ -104,7 +103,7 @@ require_once '../includes/header.php';
                                         <div class="d-flex justify-content-between align-items-center p-2 border-bottom mt-2">
                                             <div>
                                                 <i class="fas fa-tasks text-warning me-2"></i>
-                                                <?php echo $assignment['title']; ?>
+                                                <?php echo e($assignment['title']); ?>
                                                 <?php if($assignment['due_date']): ?>
                                                     <small class="text-muted">Due: <?php echo date('M j, Y', strtotime($assignment['due_date'])); ?></small>
                                                 <?php endif; ?>
@@ -142,19 +141,19 @@ require_once '../includes/header.php';
             </div>
         </div>
         
-        <div class="card mt-3">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Quick Actions</h5>
+        <div class="card shadow-sm border-0 mt-3">
+            <div class="card-header bg-white py-3 border-bottom">
+                <h5 class="card-title mb-0 fw-bold">Quick Actions</h5>
             </div>
             <div class="card-body">
-                <a href="assignments.php?course=<?php echo $course_id; ?>" class="btn btn-outline-primary w-100 mb-2">
-                    <i class="fas fa-tasks"></i> View Assignments
+                <a href="assignments.php" class="btn btn-outline-primary w-100 mb-2">
+                    <i class="fas fa-tasks me-1"></i> View Assignments
                 </a>
-                <a href="forums.php?course=<?php echo $course_id; ?>" class="btn btn-outline-success w-100 mb-2">
-                    <i class="fas fa-comments"></i> Discussion Forum
+                <a href="peer_reviews.php" class="btn btn-outline-warning text-dark w-100 mb-2">
+                    <i class="fas fa-user-check me-1"></i> Peer Reviews
                 </a>
-                <a href="quizzes.php?course=<?php echo $course_id; ?>" class="btn btn-outline-warning w-100">
-                    <i class="fas fa-question-circle"></i> Take Quizzes
+                <a href="forums.php" class="btn btn-outline-success w-100">
+                    <i class="fas fa-comments me-1"></i> Discussion Forums
                 </a>
             </div>
         </div>
@@ -163,8 +162,11 @@ require_once '../includes/header.php';
 
 <script>
 function markAsCompleted(id, type) {
-    // Implement progress tracking
-    alert('Marked as completed!');
+    const btn = event.target;
+    btn.classList.remove('btn-outline-primary');
+    btn.classList.add('btn-success');
+    btn.innerHTML = '<i class="fas fa-check me-1"></i> Completed';
+    btn.disabled = true;
 }
 </script>
 

@@ -47,6 +47,7 @@ $posts = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle new post
 if($_POST && isset($_POST['create_post'])) {
+    verify_csrf();
     $title = trim($_POST['title']);
     $content = trim($_POST['content']);
     
@@ -79,14 +80,14 @@ require_once '../includes/header.php';
 
 <?php if(isset($success)): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $success; ?>
+    <?php echo e($success); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if(isset($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -154,9 +155,12 @@ require_once '../includes/header.php';
                         </p>
                         
                         <p class="mb-2">
-                            <?php 
-                            $content = strip_tags($post['content']);
-                            echo strlen($content) > 200 ? substr($content, 0, 200) . '...' : $content;
+                            <?php
+                            // Escape for HTML, not strip_tags: a payload such as
+                            // "&lt;img src=x onerror=...&gt;" survives strip_tags and
+                            // still executes when the value is echoed.
+                            $excerpt = trim(preg_replace('/\s+/', ' ', e($post['content'])));
+                            echo strlen($excerpt) > 200 ? substr($excerpt, 0, 200) . '...' : $excerpt;
                             ?>
                         </p>
                         
@@ -206,6 +210,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="title" class="form-label">Post Title *</label>

@@ -141,6 +141,16 @@ class Auth
         if ($permanent) {
             header("HTTP/1.1 301 Moved Permanently");
         }
+        
+        // If it's a known root file and called without leading slash or protocol
+        $rootPages = ['login.php', 'register.php', 'dashboard.php', 'logout.php', 'profile.php', 'index.php'];
+        if (in_array(ltrim($url, './'), $rootPages) && defined('APP_ROOT')) {
+            $url = (APP_ROOT !== '' ? APP_ROOT : '') . '/' . ltrim($url, './');
+        } elseif (strpos($url, '../') === 0 && defined('APP_ROOT')) {
+            $cleanPath = preg_replace('#^(\.\./)+#', '', $url);
+            $url = (APP_ROOT !== '' ? APP_ROOT : '') . '/' . $cleanPath;
+        }
+
         header("Location: $url");
         exit();
     }
