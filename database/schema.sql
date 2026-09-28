@@ -1,10 +1,11 @@
 -- =======================================================
--- Interactive e-Learning System - Database Schema & Seed Data
--- Database Name: elearning_peer_review
+-- Interactive e-Learning System - Database Schema
 -- =======================================================
-
-CREATE DATABASE IF NOT EXISTS `elearning_peer_review` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE `elearning_peer_review`;
+-- Import this file INTO an existing, empty database, e.g.:
+--   phpMyAdmin -> select your database -> Import -> choose this file
+-- It does not create or switch databases itself, so it works even on
+-- shared hosts whose MySQL user cannot run CREATE DATABASE.
+-- =======================================================
 
 SET FOREIGN_KEY_CHECKS = 0;
 
