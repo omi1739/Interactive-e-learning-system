@@ -1,99 +1,21 @@
 # ==============================================================
-#  Interactive e-Learning System - Apache configuration
+#  Interactive e-Learning System - Apache/LiteSpeed configuration
 # ==============================================================
-#  Assumes the application runs in the web root (e.g. htdocs/public_html).
-#  If you can move the writable directories outside the web root and point
-#  UPLOAD_DIR / LOG_DIR at them in config/local.php, that is better still.
+#  Deliberately kept small: the previous version used RedirectMatch,
+#  which some LiteSpeed builds (including ByetFree) reject and turn
+#  into a 500 for the whole site. Access control is now done with
+#  per-directory .htaccess files instead (see config/, includes/,
+#  install/, database/, logs/, uploads/).
 
-# --------------------------------------------------------------
-# Default document
-# --------------------------------------------------------------
-DirectoryIndex index.php index.html
-
-# --------------------------------------------------------------
-# Block access to sensitive files and directories
-# --------------------------------------------------------------
-# Database dumps and credentials.
-<FilesMatch "\.(sql|sqlite|sqlite3|db|md5|log|ini|sh|bak|old|orig|save|swp|dist|env|example)$">
-    <IfModule mod_authz_core.c>
-        Require all denied
-    </IfModule>
-    <IfModule !mod_authz_core.c>
-        Order deny,allow
-        Deny from all
-    </IfModule>
-</FilesMatch>
-
-# Dotfiles such as .env, .git, .gitignore, .htpasswd
-<FilesMatch "^\.">
-    <IfModule mod_authz_core.c>
-        Require all denied
-    </IfModule>
-    <IfModule !mod_authz_core.c>
-        Order deny,allow
-        Deny from all
-    </IfModule>
-</FilesMatch>
-
-# The included PHP libraries and the install folder are never entry points.
-# create_admin.php must stay CLI-only, and application source should not be
-# browsable. download.php is the one exception: it is the only sanctioned way
-# to read an uploaded submission.
-RedirectMatch 404 ^/(includes|install|database)/(.*)$
-RedirectMatch 404 ^/includes/.*\.php$
-
-<Files "download.php">
-    # Keep the rule above from blocking the file we need to execute.
-    <IfModule mod_authz_core.c>
-        Require all granted
-    </IfModule>
-</Files>
-
-# --------------------------------------------------------------
-# Directory listing
-# --------------------------------------------------------------
-Options -Indexes -ExecCGI
+# No directory listings.
+Options -Indexes
 
 # --------------------------------------------------------------
 # Security response headers
 # --------------------------------------------------------------
 <IfModule mod_headers.c>
-    # Do not let a browser second-guess the declared content type, which would
-    # allow an uploaded HTML/SVG file to run as script on this origin.
     Header always set X-Content-Type-Options "nosniff"
-
-    # Stop the app being framed (clickjacking).
     Header always set X-Frame-Options "SAMEORIGIN"
-
-    # Do not leak the PHP version or other server details.
-    Header always unset X-Powered-By
-
-    # Referrer should not carry full URLs to third parties.
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-
-    # Only allow framing from our own origin (newer CSP directive).
-    <FilesMatch "\.php$">
-        Header always set Content-Security-Policy "frame-ancestors 'self'"
-    </FilesMatch>
-
-    # Remove the ServerToken banner on some configurations.
-    Header unset Server
-</IfModule>
-
-# --------------------------------------------------------------
-# Sensitive pages must never be cached by a shared proxy
-# --------------------------------------------------------------
-<FilesMatch "\.php$">
-    <IfModule mod_headers.c>
-        Header always set Cache-Control "no-store, no-cache, must-revalidate, private"
-        Header always set Pragma "no-cache"
-    </IfModule>
-</FilesMatch>
-
-# --------------------------------------------------------------
-# Do not advertise or expose server-side includes
-# --------------------------------------------------------------
-<IfModule mod_php.c>
-    php_flag display_errors off
-    php_flag expose_php off
+    Header always unset X-Powered-By
 </IfModule>
