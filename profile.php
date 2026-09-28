@@ -10,6 +10,7 @@ $user_profile = $functions->getUserProfile($_SESSION['user_id']);
 
 // Handle profile update
 if($_POST && isset($_POST['update_profile'])) {
+    verify_csrf();
     $first_name = trim($_POST['first_name']);
     $last_name = trim($_POST['last_name']);
     $email = trim($_POST['email']);
@@ -36,11 +37,11 @@ require_once 'includes/header.php';
 </div>
 
 <?php if(isset($success)): ?>
-<div class="alert alert-success"><?php echo $success; ?></div>
+<div class="alert alert-success"><?php echo e($success); ?></div>
 <?php endif; ?>
 
 <?php if(isset($error)): ?>
-<div class="alert alert-danger"><?php echo $error; ?></div>
+<div class="alert alert-danger"><?php echo e($error); ?></div>
 <?php endif; ?>
 
 <div class="row">
@@ -51,6 +52,7 @@ require_once 'includes/header.php';
             </div>
             <div class="card-body">
                 <form method="POST">
+                    <?php echo csrf_field(); ?>
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">

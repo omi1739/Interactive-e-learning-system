@@ -1,0 +1,22 @@
+# Local secrets: never commit real database credentials or the cron token.
+config/local.php
+
+# Runtime error log
+logs/*.log
+
+# User uploads: real student submissions must never live in version control.
+uploads/assignments/*
+!uploads/assignments/.gitkeep
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local tooling
+*.sql.gz
+*.bak

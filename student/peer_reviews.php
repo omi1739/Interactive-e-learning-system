@@ -76,7 +76,7 @@ require_once '../includes/header.php';
                             <div class="mb-2">
                                 <small><strong>Submission Preview:</strong></small>
                                 <div class="border p-2 bg-light small">
-                                    <?php echo substr(strip_tags($review['submission_text']), 0, 100); ?>...
+                                    <?php echo substr(e($review['submission_text']), 0, 100); ?>...
                                 </div>
                             </div>
                         <?php endif; ?>

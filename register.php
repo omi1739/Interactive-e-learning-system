@@ -6,6 +6,7 @@ if ($auth->isLoggedIn()) {
 }
 
 if ($_POST) {
+    verify_csrf();
     $username = $_POST['username'];
     $email = $_POST['email'];
     $password = $_POST['password'];
@@ -75,14 +76,15 @@ if ($_POST) {
                         </div>
 
                         <?php if (isset($error)): ?>
-                            <div class="alert alert-danger"><?php echo $error; ?></div>
+                            <div class="alert alert-danger"><?php echo e($error); ?></div>
                         <?php endif; ?>
 
                         <?php if (isset($success)): ?>
-                            <div class="alert alert-success"><?php echo $success; ?></div>
+                            <div class="alert alert-success"><?php echo e($success); ?></div>
                         <?php endif; ?>
 
                         <form method="POST">
+                            <?php echo csrf_field(); ?>
                             <div class="row">
                                 <div class="col-md-6">
                                     <div class="mb-3">

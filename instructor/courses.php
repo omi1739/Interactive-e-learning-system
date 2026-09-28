@@ -10,6 +10,7 @@ $conn = $db->getConnection();
 
 // Handle course creation - FIXED: Set is_published = TRUE
 if($_POST && isset($_POST['create_course'])) {
+    verify_csrf();
     $title = trim($_POST['title']);
     $description = trim($_POST['description']);
     $course_code = trim($_POST['course_code']);
@@ -59,14 +60,14 @@ require_once '../includes/header.php';
 
 <?php if(!empty($success)): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $success; ?>
+    <?php echo e($success); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if(!empty($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -78,7 +79,7 @@ require_once '../includes/header.php';
             <div class="card course-card h-100">
                 <div class="card-body">
                     <h5 class="card-title"><?php echo htmlspecialchars($course['title']); ?></h5>
-                    <p class="card-text"><?php echo substr($course['description'] ?? 'No description', 0, 100) . '...'; ?></p>
+                    <p class="card-text"><?php echo e(substr($course['description'] ?? 'No description', 0, 100) . '...'); ?></p>
                     <p class="card-text">
                         <small class="text-muted">
                             Code: <?php echo htmlspecialchars($course['course_code']); ?>
@@ -99,9 +100,16 @@ require_once '../includes/header.php';
                         </small>
                     </p>
                 </div>
-                <div class="card-footer">
-                    <a href="course_manage.php?id=<?php echo $course['course_id']; ?>" class="btn btn-primary btn-sm">Manage</a>
-                    <a href="students.php?course_id=<?php echo $course['course_id']; ?>" class="btn btn-info btn-sm">Students</a>
+                <div class="card-footer bg-white border-top-0 pt-0 pb-3 d-flex gap-2">
+                    <a href="course_manage.php?id=<?php echo $course['course_id']; ?>" class="btn btn-primary btn-sm flex-grow-1">
+                        <i class="fas fa-cog me-1"></i> Manage
+                    </a>
+                    <a href="course_edit.php?id=<?php echo $course['course_id']; ?>" class="btn btn-outline-secondary btn-sm" title="Edit Course & Modules">
+                        <i class="fas fa-edit me-1"></i> Edit & Modules
+                    </a>
+                    <a href="students.php?course_id=<?php echo $course['course_id']; ?>" class="btn btn-outline-info btn-sm" title="Enrolled Students">
+                        <i class="fas fa-users"></i>
+                    </a>
                 </div>
             </div>
         </div>
@@ -125,6 +133,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" id="createCourseForm">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="title" class="form-label">Course Title <span class="text-danger">*</span></label>

@@ -9,7 +9,7 @@ if(!isset($_GET['id'])) {
     $auth->redirect('assignments.php');
 }
 
-$assignment_id = $_GET['id'];
+$assignment_id = intval($_GET['id'] ?? 0);
 $db = new Database();
 $conn = $db->getConnection();
 
@@ -41,6 +41,7 @@ $pending_count = $stmt->fetch(PDO::FETCH_ASSOC)['pending'];
 
 // Handle peer review assignment
 if($_POST && isset($_POST['assign_reviews'])) {
+    verify_csrf();
     $reviews_per_submission = $_POST['reviews_per_submission'] ?? 2;
     
     $assignments_made = $functions->assignPeerReviews($assignment_id, $reviews_per_submission);
@@ -56,26 +57,53 @@ if($_POST && isset($_POST['assign_reviews'])) {
 
 // Handle manual review assignment
 if($_POST && isset($_POST['assign_manual_review'])) {
-    $submission_id = $_POST['submission_id'];
-    $reviewer_id = $_POST['reviewer_id'];
-    
-    // Check if review already exists
-    $check_stmt = $conn->prepare("SELECT * FROM peer_reviews WHERE submission_id = ? AND reviewer_id = ?");
-    $check_stmt->execute([$submission_id, $reviewer_id]);
-    
-    if($check_stmt->rowCount() > 0) {
-        $error = "This review assignment already exists.";
-    } else {
-        $stmt = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status) VALUES (?, ?, 'in_progress')");
-        if($stmt->execute([$submission_id, $reviewer_id])) {
-            $success = "Manual review assignment created successfully!";
-            // Refresh assignment data
-            $assignment_review = $functions->getAssignmentForReview($assignment_id);
-        } else {
-            $error = "Failed to assign review. Please try again.";
-        }
+    verify_csrf();
+    $submission_id = intval($_POST['submission_id'] ?? 0);
+    $reviewer_id = intval($_POST['reviewer_id'] ?? 0);
+
+    // Both ids arrive from the form. Check that the submission really belongs
+    // to this assignment and that the reviewer is an approved enrolled student
+    // of this course; otherwise one instructor could create reviews in another
+    // teacher's course, or let a non-participant grade work.
+    $submission_ok = false;
+    if($submission_id > 0) {
+        $s = $conn->prepare("SELECT submission_id FROM submissions WHERE submission_id = ? AND assignment_id = ?");
+        $s->execute([$submission_id, $assignment_id]);
+        $submission_ok = (bool)$s->fetch();
     }
-}
+
+    $reviewer_ok = false;
+    if($reviewer_id > 0) {
+        $r = $conn->prepare("SELECT e.user_id
+                             FROM enrollments e
+                             WHERE e.course_id = ? AND e.user_id = ? AND e.enrollment_status = 'approved'");
+        $r->execute([$assignment['course_id'], $reviewer_id]);
+        $reviewer_ok = (bool)$r->fetch();
+    }
+
+    if(!$submission_ok) {
+        $error = "That submission does not belong to this assignment.";
+    } elseif(!$reviewer_ok) {
+        $error = "The selected reviewer is not an approved student in this course.";
+    } else {
+        // Check if review already exists
+        $check_stmt = $conn->prepare("SELECT * FROM peer_reviews WHERE submission_id = ? AND reviewer_id = ?");
+        $check_stmt->execute([$submission_id, $reviewer_id]);
+        
+        if($check_stmt->rowCount() > 0) {
+            $error = "This review assignment already exists.";
+        } else {
+            $stmt = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status) VALUES (?, ?, 'in_progress')");
+            if($stmt->execute([$submission_id, $reviewer_id])) {
+                $success = "Manual review assignment created successfully!";
+                // Refresh assignment data
+                $assignment_review = $functions->getAssignmentForReview($assignment_id);
+            } else {
+                $error = "Failed to assign review. Please try again.";
+            }
+        }   // end: check_stmt else
+    }       // end: submission/reviewer validation else
+}           // end: POST handler
 
 // Get students available for review assignment
 $stmt = $conn->prepare("SELECT u.user_id, u.first_name, u.last_name, u.email
@@ -124,14 +152,14 @@ require_once '../includes/header.php';
 
 <?php if(isset($success)): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $success; ?>
+    <?php echo e($success); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if(isset($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -200,6 +228,7 @@ require_once '../includes/header.php';
                         </p>
                         
                         <form method="POST" class="row g-3 align-items-end">
+                            <?php echo csrf_field(); ?>
                             <div class="col-md-4">
                                 <label for="reviews_per_submission" class="form-label">Reviews per Submission</label>
                                 <select class="form-select" id="reviews_per_submission" name="reviews_per_submission">
@@ -224,6 +253,7 @@ require_once '../includes/header.php';
                     <div class="col-12">
                         <h6>Manual Review Assignment</h6>
                         <form method="POST" class="row g-3">
+                            <?php echo csrf_field(); ?>
                             <div class="col-md-5">
                                 <label for="submission_id" class="form-label">Select Submission</label>
                                 <select class="form-select" id="submission_id" name="submission_id" required>
@@ -408,6 +438,7 @@ require_once '../includes/header.php';
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <p>Configure automatic peer review assignment for this assignment.</p>
                     

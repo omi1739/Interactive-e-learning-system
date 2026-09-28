@@ -9,7 +9,7 @@ if(!isset($_GET['id'])) {
     $auth->redirect('assignments.php');
 }
 
-$submission_id = $_GET['id'];
+$submission_id = intval($_GET['id'] ?? 0);
 $db = new Database();
 $conn = $db->getConnection();
 
@@ -29,12 +29,38 @@ if(!$submission || $submission['instructor_id'] != $_SESSION['user_id']) {
     $auth->redirect('assignments.php');
 }
 
-// Get peer reviews for this submission
-$stmt = $conn->prepare("SELECT pr.*, u.first_name, u.last_name, u.username
-                       FROM peer_reviews pr
-                       JOIN users u ON pr.reviewer_id = u.user_id
-                       WHERE pr.submission_id = ?
-                       ORDER BY pr.review_date DESC");
+// Handle grade submission directly on this page
+if($_POST && isset($_POST['update_grade'])) {
+    verify_csrf();
+    $grade = floatval($_POST['grade'] ?? 0);
+    $feedback = trim($_POST['feedback'] ?? '');
+    
+    if($grade >= 0 && $grade <= $submission['max_points']) {
+        $update_stmt = $conn->prepare("UPDATE submissions SET final_grade = ?, instructor_feedback = ?, status = 'graded' WHERE submission_id = ?");
+        if($update_stmt->execute([$grade, $feedback, $submission_id])) {
+            $_SESSION['success'] = "Grade and feedback saved successfully!";
+            header("Location: submission_view.php?id=" . $submission_id);
+            exit();
+        } else {
+            $_SESSION['error'] = "Failed to update grade.";
+        }
+    } else {
+        $_SESSION['error'] = "Grade must be between 0 and " . $submission['max_points'];
+    }
+}
+
+$success = $_SESSION['success'] ?? '';
+$error = $_SESSION['error'] ?? '';
+unset($_SESSION['success'], $_SESSION['error']);
+
+// Get peer reviews for this submission with rubric score details
+$stmt = $conn->prepare("SELECT pr.*, u.first_name, u.last_name, u.username,
+                               (SELECT AVG(rs.score) FROM review_scores rs WHERE rs.review_id = pr.review_id) as avg_score,
+                               (SELECT SUM(rs.score) FROM review_scores rs WHERE rs.review_id = pr.review_id) as total_rubric_score
+                        FROM peer_reviews pr
+                        JOIN users u ON pr.reviewer_id = u.user_id
+                        WHERE pr.submission_id = ?
+                        ORDER BY pr.review_date DESC");
 $stmt->execute([$submission_id]);
 $reviews = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -49,6 +75,20 @@ require_once '../includes/header.php';
         </a>
     </div>
 </div>
+
+<?php if(!empty($success)): ?>
+<div class="alert alert-success alert-dismissible fade show" role="alert">
+    <?php echo e($success); ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
+
+<?php if(!empty($error)): ?>
+<div class="alert alert-danger alert-dismissible fade show" role="alert">
+    <?php echo e($error); ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+<?php endif; ?>
 
 <div class="row">
     <div class="col-md-8">
@@ -79,7 +119,7 @@ require_once '../includes/header.php';
                 <?php if($submission['file_path']): ?>
                 <div class="mb-4">
                     <h6>Submitted File</h6>
-                    <a href="<?php echo htmlspecialchars($submission['file_path']); ?>" target="_blank" class="btn btn-outline-primary">
+                    <a href="download.php?submission_id=<?php echo (int)$submission['submission_id']; ?>" class="btn btn-outline-primary">
                         <i class="fas fa-download"></i> Download File: <?php echo htmlspecialchars($submission['file_name']); ?>
                     </a>
                 </div>
@@ -180,7 +220,8 @@ require_once '../includes/header.php';
                 <h5 class="modal-title">Grade Submission</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <form method="POST" action="assignment_submissions.php">
+            <form method="POST" action="submission_view.php?id=<?php echo $submission_id; ?>">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <p><strong>Student:</strong> <?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></p>
                     

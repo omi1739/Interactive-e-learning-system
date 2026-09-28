@@ -9,7 +9,7 @@ if(!isset($_GET['id'])) {
     $auth->redirect('assignments.php');
 }
 
-$assignment_id = $_GET['id'];
+$assignment_id = intval($_GET['id'] ?? 0);
 $db = new Database();
 $conn = $db->getConnection();
 
@@ -42,32 +42,62 @@ $submissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Handle grade submission
 if($_POST && isset($_POST['update_grade'])) {
-    $submission_id = $_POST['submission_id'];
+    verify_csrf();
+    $submission_id = intval($_POST['submission_id'] ?? 0);
     $grade = $_POST['grade'];
     $feedback = trim($_POST['feedback']);
-    
-    // Validate grade
-    if($grade >= 0 && $grade <= $assignment['max_points']) {
-        $stmt = $conn->prepare("UPDATE submissions SET final_grade = ?, instructor_feedback = ?, status = 'graded' WHERE submission_id = ?");
-        if($stmt->execute([$grade, $feedback, $submission_id])) {
+
+    // The page already proves we own the assignment, but the submission id
+    // arrives from the form. Verify it belongs to THIS assignment, otherwise
+    // an instructor could grade a submission in another course by guessing ids.
+    $owns_submission = false;
+    if($submission_id > 0) {
+        $check = $conn->prepare("SELECT submission_id FROM submissions WHERE submission_id = ? AND assignment_id = ?");
+        $check->execute([$submission_id, $assignment_id]);
+        $owns_submission = (bool)$check->fetch();
+    }
+
+    if(!$owns_submission) {
+        $error = "That submission does not belong to this assignment.";
+    } elseif(!is_numeric($grade) || $grade < 0 || $grade > $assignment['max_points']) {
+        $error = "Grade must be a number between 0 and " . $assignment['max_points'];
+    } else {
+        $stmt = $conn->prepare("UPDATE submissions SET final_grade = ?, instructor_feedback = ?, status = 'graded' WHERE submission_id = ? AND assignment_id = ?");
+        if($stmt->execute([$grade, $feedback, $submission_id, $assignment_id])) {
             $_SESSION['success'] = "Grade updated successfully!";
-            header("Location: assignment_submissions.php?id=" . $assignment_id);
+            header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
             exit();
         } else {
             $error = "Failed to update grade.";
         }
-    } else {
-        $error = "Grade must be between 0 and " . $assignment['max_points'];
     }
 }
 
 // Handle bulk actions
 if($_POST && isset($_POST['bulk_action'])) {
-    $selected_submissions = $_POST['selected_submissions'] ?? [];
+    verify_csrf();
     $action = $_POST['bulk_action'];
-    
+
+    // Restrict the incoming id list to submissions that really belong to this
+    // assignment, so a crafted form cannot reach another course's rows.
+    $requested = $_POST['selected_submissions'] ?? [];
+    if(!is_array($requested)) {
+        $requested = [];
+    }
+    $selected_submissions = [];
+    if(!empty($requested)) {
+        $ids = array_values(array_unique(array_map('intval', $requested)));
+        $ids = array_filter($ids, static fn($v) => $v > 0);
+        if(!empty($ids)) {
+            $ph = implode(',', array_fill(0, count($ids), '?'));
+            $owned = $conn->prepare("SELECT submission_id FROM submissions WHERE assignment_id = ? AND submission_id IN ($ph)");
+            $owned->execute(array_merge([(int)$assignment_id], $ids));
+            $selected_submissions = array_map('intval', $owned->fetchAll(PDO::FETCH_COLUMN));
+        }
+    }
+
     if(empty($selected_submissions)) {
-        $error = "No submissions selected for bulk action.";
+        $error = "No valid submissions selected for bulk action.";
     } else {
         $placeholders = str_repeat('?,', count($selected_submissions) - 1) . '?';
         
@@ -93,7 +123,7 @@ if($_POST && isset($_POST['bulk_action'])) {
                 break;
         }
         
-        header("Location: assignment_submissions.php?id=" . $assignment_id);
+        header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
         exit();
     }
 }
@@ -173,14 +203,14 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
 
 <?php if(!empty($success)): ?>
 <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo $success; ?>
+    <?php echo e($success); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
 
 <?php if(!empty($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo $error; ?>
+    <?php echo e($error); ?>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
 <?php endif; ?>
@@ -377,6 +407,7 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
                                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                                     </div>
                                     <form method="POST">
+                                        <?php echo csrf_field(); ?>
                                         <div class="modal-body">
                                             <div class="row mb-3">
                                                 <div class="col-md-6">
@@ -494,6 +525,7 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" id="bulkActionsForm">
+                <?php echo csrf_field(); ?>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="bulk_action" class="form-label">Select Action</label>
@@ -541,7 +573,7 @@ document.getElementById('bulkActionsForm').addEventListener('submit', function(e
 function assignSingleReview(submissionId) {
     if(confirm('Assign 2 peer reviews to this submission?')) {
         // This would typically be an AJAX call
-        window.location.href = `assignment_view.php?id=<?php echo $assignment_id; ?>&assign_single=${submissionId}`;
+        window.location.href = `assignment_view.php?id=<?php echo (int)$assignment_id; ?>&assign_single=${submissionId}`;
     }
 }
 

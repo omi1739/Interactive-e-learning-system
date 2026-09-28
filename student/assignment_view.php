@@ -47,6 +47,7 @@ $success = '';
 
 // Handle submission
 if($_POST && isset($_POST['submit_assignment'])) {
+    verify_csrf();
     $submission_text = trim($_POST['submission_text'] ?? '');
     
     // Validate based on submission format
@@ -68,45 +69,68 @@ if($_POST && isset($_POST['submit_assignment'])) {
         $file_name = null;
         
         if(isset($_FILES['submission_file']) && $_FILES['submission_file']['error'] == 0) {
-            // FIXED: Correct upload directory path
-            $upload_dir = '../uploads/assignments/';
-            
-            // Create directory if it doesn't exist
+            // Uploads live in the directory configured in config/local.php,
+            // which on GoogieHost sits OUTSIDE the web root. Nothing here is
+            // ever reachable as a plain URL.
+            $upload_dir = UPLOAD_DIR;
             if(!is_dir($upload_dir)) {
-                mkdir($upload_dir, 0755, true);
+                @mkdir($upload_dir, 0755, true);
             }
-            
-            // Check file size
+
+            $upload_error = null;
+
+            // 1. Size limit
             $max_file_size = ($assignment['max_file_size'] ?? 10) * 1024 * 1024;
             if($_FILES['submission_file']['size'] > $max_file_size) {
-                $error = "File size exceeds maximum allowed size of " . ($assignment['max_file_size'] ?? 10) . "MB.";
+                $upload_error = "File size exceeds maximum allowed size of " . ($assignment['max_file_size'] ?? 10) . "MB.";
+            } elseif($_FILES['submission_file']['size'] === 0) {
+                $upload_error = "The uploaded file is empty.";
             } else {
-                $file_name = basename($_FILES['submission_file']['name']);
-                $file_extension = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
-                $unique_filename = uniqid() . '_' . preg_replace('/[^a-zA-Z0-9\._-]/', '_', $file_name);
-                $file_path = $upload_dir . $unique_filename;
-                
-                // Check allowed file types if specified
-                $allowed_types = $assignment['allowed_file_types'] ?? '';
-                if(!empty($allowed_types)) {
-                    $allowed_extensions = array_map('trim', explode(',', $allowed_types));
-                    $allowed_extensions = array_map(function($ext) {
-                        return ltrim($ext, '.');
-                    }, $allowed_extensions);
-                    
-                    if(!in_array($file_extension, $allowed_extensions)) {
-                        $error = "File type '." . $file_extension . "' not allowed. Allowed types: " . $allowed_types;
+                $original_name = basename($_FILES['submission_file']['name']);
+                $file_extension = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
+
+                // 2. Extension allowlist. This must ALWAYS be enforced: if the
+                //    assignment defines no allowed types we fall back to a
+                //    conservative default, otherwise a .php or .phtml upload
+                //    would be accepted and could be executed by the server.
+                $allowed_extensions = allowed_upload_extensions($assignment['allowed_file_types'] ?? '');
+                if(!in_array($file_extension, $allowed_extensions, true)) {
+                    $upload_error = "File type not allowed. Permitted types: " . implode(', ', $allowed_extensions) . ".";
+                }
+                // 3. Never allow double extensions that hide a script
+                //    (e.g. "report.php.pdf") or any server-executable form.
+                elseif(preg_match('/\.(php|phtml|phar|php[0-9]|cgi|pl|py|sh|htaccess)/i', $original_name)) {
+                    $upload_error = "File type not allowed.";
+                } else {
+                    // 4. Confirm the real content type, so a renamed script
+                    //    (evil.pdf containing PHP) is rejected too.
+                    $detected = upload_detected_mime($_FILES['submission_file']['tmp_name']);
+                    if($detected === null || !in_array($detected, allowed_upload_mimes(), true)) {
+                        $upload_error = "File content does not match a permitted file type.";
                     }
                 }
-                
-                if(empty($error)) {
-                    if(move_uploaded_file($_FILES['submission_file']['tmp_name'], $file_path)) {
-                        // Convert to web-accessible path for database
-                        $file_path = str_replace('../', '/Interactive-e-learning-system/', $file_path);
+
+                if($upload_error === null) {
+                    // Random stored name; the original name is kept only as
+                    // display metadata in the database.
+                    $safe_base = preg_replace('/[^a-zA-Z0-9._-]/', '_', $original_name);
+                    $stored_filename = bin2hex(random_bytes(16)) . '_' . $safe_base;
+                    $target = rtrim($upload_dir, '/') . '/' . $stored_filename;
+
+                    if(move_uploaded_file($_FILES['submission_file']['tmp_name'], $target)) {
+                        @chmod($target, 0644);
+                        // Store ONLY the stored filename. download.php resolves
+                        // it against UPLOAD_DIR after an authorization check.
+                        $file_path = $stored_filename;
+                        $file_name = $original_name;
                     } else {
-                        $error = "Failed to upload file. Please try again.";
+                        $upload_error = "Failed to save the uploaded file. Please try again.";
                     }
                 }
+            }
+
+            if($upload_error !== null) {
+                $error = $upload_error;
             }
         }
         
@@ -173,14 +197,14 @@ require_once '../includes/header.php';
 <!-- Display Messages -->
 <?php if(!empty($success)): ?>
     <div class="alert alert-success alert-dismissible fade show" role="alert">
-        <?php echo $success; ?>
+        <?php echo e($success); ?>
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
     </div>
 <?php endif; ?>
 
 <?php if(!empty($error)): ?>
     <div class="alert alert-danger alert-dismissible fade show" role="alert">
-        <?php echo $error; ?>
+        <?php echo e($error); ?>
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
     </div>
 <?php endif; ?>
@@ -237,7 +261,7 @@ require_once '../includes/header.php';
 
                         <?php if($submission['file_path']): ?>
                             <p><strong>File:</strong>
-                                <a href="<?php echo htmlspecialchars($submission['file_path']); ?>" target="_blank" class="btn btn-sm btn-outline-primary">
+                                <a href="../download.php?submission_id=<?php echo (int)$submission['submission_id']; ?>" class="btn btn-sm btn-outline-primary">
                                     <i class="fas fa-download"></i> Download File
                                 </a>
                             </p>
@@ -255,18 +279,19 @@ require_once '../includes/header.php';
                 <?php endif; ?>
 
                 <form method="POST" enctype="multipart/form-data" id="assignmentForm">
+                    <?php echo csrf_field(); ?>
                     <?php if(in_array($assignment['submission_format'], ['text', 'both'])): ?>
                         <div class="mb-3">
-                            <label for="submission_text" class="form-label">Text Submission <?php echo in_array($assignment['submission_format'], ['text']) ? '<span class="text-danger">*</span>' : ''; ?></label>
+                            <label for="submission_text" class="form-label">Text Submission <?php echo e(in_array($assignment['submission_format'], ['text']) ? '<span class="text-danger">*</span>' : ''); ?></label>
                             <textarea class="form-control" id="submission_text" name="submission_text" rows="6"
                                 placeholder="Enter your assignment text here..."><?php echo htmlspecialchars($submission['submission_text'] ?? ''); ?></textarea>
-                            <div class="form-text"><?php echo in_array($assignment['submission_format'], ['text']) ? 'Text submission is required.' : 'Optional text submission'; ?></div>
+                            <div class="form-text"><?php echo e(in_array($assignment['submission_format'], ['text']) ? 'Text submission is required.' : 'Optional text submission'); ?></div>
                         </div>
                     <?php endif; ?>
 
                     <?php if(in_array($assignment['submission_format'], ['file', 'both'])): ?>
                         <div class="mb-3">
-                            <label for="submission_file" class="form-label">File Upload <?php echo in_array($assignment['submission_format'], ['file']) ? '<span class="text-danger">*</span>' : ''; ?></label>
+                            <label for="submission_file" class="form-label">File Upload <?php echo e(in_array($assignment['submission_format'], ['file']) ? '<span class="text-danger">*</span>' : ''); ?></label>
                             <input type="file" class="form-control" id="submission_file" name="submission_file"
                                 accept="<?php echo htmlspecialchars($assignment['allowed_file_types'] ?? '*'); ?>">
                             <div class="form-text">
@@ -274,7 +299,7 @@ require_once '../includes/header.php';
                                 <?php if($assignment['allowed_file_types']): ?>
                                     | Allowed types: <?php echo htmlspecialchars($assignment['allowed_file_types']); ?>
                                 <?php endif; ?>
-                                <?php echo in_array($assignment['submission_format'], ['file']) ? '| File upload is required.' : '| Optional file upload'; ?>
+                                <?php echo e(in_array($assignment['submission_format'], ['file']) ? '| File upload is required.' : '| Optional file upload'); ?>
                             </div>
                         </div>
                     <?php endif; ?>
@@ -367,7 +392,7 @@ require_once '../includes/header.php';
     <div class="card-body">
         <p><strong>Assignment ID:</strong> <?php echo $assignment_id; ?></p>
         <p><strong>User ID:</strong> <?php echo $_SESSION['user_id']; ?></p>
-        <p><strong>Submission Format:</strong> <?php echo $assignment['submission_format']; ?></p>
+        <p><strong>Submission Format:</strong> <?php echo e($assignment['submission_format']); ?></p>
         <p><strong>Existing Submission:</strong> <?php echo $submission ? 'Yes (ID: ' . $submission['submission_id'] . ')' : 'No'; ?></p>
         <p><strong>PHP Upload Max Size:</strong> <?php echo ini_get('upload_max_filesize'); ?></p>
         <p><strong>PHP Post Max Size:</strong> <?php echo ini_get('post_max_size'); ?></p>
@@ -376,7 +401,7 @@ require_once '../includes/header.php';
 
 <script>
     function validateForm() {
-        const submissionFormat = '<?php echo $assignment['submission_format']; ?>';
+        const submissionFormat = '<?php echo e($assignment['submission_format']); ?>';
         const hasText = document.getElementById('submission_text') && document.getElementById('submission_text').value.trim() !== '';
         const hasFile = document.getElementById('submission_file') && document.getElementById('submission_file').files.length > 0;
 

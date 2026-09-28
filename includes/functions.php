@@ -130,74 +130,107 @@ class Functions {
 
 
     // Auto-assign peer reviews for an assignment
-public function assignPeerReviews($assignment_id, $reviews_per_submission = 2) {
-    try {
-        $conn = $this->conn;
-        
-        // Begin transaction
-        $conn->beginTransaction();
-        
-        // Get all submissions for this assignment
-        $stmt = $conn->prepare("SELECT submission_id, student_id FROM submissions WHERE assignment_id = ?");
-        $stmt->execute([$assignment_id]);
-        $submissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        if(count($submissions) < 2) {
-            throw new Exception("Need at least 2 submissions for peer review assignment");
-        }
-        
-        // Get all students who submitted (for exclusion)
-        $submitting_students = array_column($submissions, 'student_id');
-        
-        // Get all enrolled students in the course
-        $stmt = $conn->prepare("SELECT DISTINCT u.user_id 
-                               FROM users u 
-                               JOIN enrollments e ON u.user_id = e.user_id 
-                               JOIN assignments a ON a.assignment_id = ?
-                               JOIN modules m ON a.module_id = m.module_id 
-                               WHERE e.course_id = m.course_id 
-                               AND e.enrollment_status = 'approved'");
-        $stmt->execute([$assignment_id]);
-        $all_students = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        
-        $potential_reviewers = array_diff($all_students, $submitting_students);
-        
-        $assignments_made = 0;
-        
-        foreach($submissions as $submission) {
-            $submission_id = $submission['submission_id'];
-            $author_id = $submission['student_id'];
+    // Auto-assign peer reviews for an assignment - FIXED & BALANCED
+    public function assignPeerReviews($assignment_id, $reviews_per_submission = 2) {
+        try {
+            $conn = $this->conn;
             
-            // Get current reviews for this submission to avoid duplicates
-            $stmt = $conn->prepare("SELECT reviewer_id FROM peer_reviews WHERE submission_id = ?");
-            $stmt->execute([$submission_id]);
-            $current_reviewers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            // Begin transaction
+            $conn->beginTransaction();
             
-            // Available reviewers (not author, not already assigned)
-            $available_reviewers = array_diff($potential_reviewers, [$author_id], $current_reviewers);
+            // Get all submissions for this assignment
+            $stmt = $conn->prepare("SELECT submission_id, student_id FROM submissions WHERE assignment_id = ?");
+            $stmt->execute([$assignment_id]);
+            $submissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            // Shuffle to randomize assignment
-            shuffle($available_reviewers);
-            
-            // Assign required number of reviews
-            $reviewers_to_assign = array_slice($available_reviewers, 0, $reviews_per_submission);
-            
-            foreach($reviewers_to_assign as $reviewer_id) {
-                $stmt = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status) VALUES (?, ?, 'in_progress')");
-                $stmt->execute([$submission_id, $reviewer_id]);
-                $assignments_made++;
+            if(count($submissions) < 2) {
+                throw new Exception("Need at least 2 submissions for peer review assignment");
             }
+            
+            // In peer review, students who submitted review their peers
+            $submitting_students = array_column($submissions, 'student_id');
+            
+            // Get all enrolled students in the course as fallback pool
+            $stmt = $conn->prepare("SELECT DISTINCT u.user_id 
+                                   FROM users u 
+                                   JOIN enrollments e ON u.user_id = e.user_id 
+                                   JOIN assignments a ON a.assignment_id = ?
+                                   JOIN modules m ON a.module_id = m.module_id 
+                                   WHERE e.course_id = m.course_id 
+                                   AND e.enrollment_status = 'approved'");
+            $stmt->execute([$assignment_id]);
+            $enrolled_students = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            
+            // Primary reviewer pool: submitting students; fallback to all enrolled students
+            $potential_reviewers = count($submitting_students) >= 2 ? $submitting_students : $enrolled_students;
+            
+            $assignments_made = 0;
+            
+            // Track reviewer loads to distribute assignments fairly
+            $reviewer_load = array_fill_keys($potential_reviewers, 0);
+            $stmt = $conn->prepare("SELECT pr.reviewer_id, COUNT(*) as cnt
+                                   FROM peer_reviews pr
+                                   JOIN submissions s ON pr.submission_id = s.submission_id
+                                   WHERE s.assignment_id = ?
+                                   GROUP BY pr.reviewer_id");
+            $stmt->execute([$assignment_id]);
+            $existing_counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            foreach ($existing_counts as $rid => $cnt) {
+                if (isset($reviewer_load[$rid])) {
+                    $reviewer_load[$rid] = (int)$cnt;
+                }
+            }
+            
+            foreach($submissions as $submission) {
+                $submission_id = $submission['submission_id'];
+                $author_id = $submission['student_id'];
+                
+                // Get current reviews for this submission to avoid duplicates
+                $stmt = $conn->prepare("SELECT reviewer_id FROM peer_reviews WHERE submission_id = ?");
+                $stmt->execute([$submission_id]);
+                $current_reviewers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                
+                $needed = $reviews_per_submission - count($current_reviewers);
+                if ($needed <= 0) {
+                    continue;
+                }
+                
+                // Available reviewers: not the author, and not already assigned to this submission
+                $candidates = array_values(array_filter($potential_reviewers, function($rid) use ($author_id, $current_reviewers) {
+                    return $rid != $author_id && !in_array($rid, $current_reviewers);
+                }));
+                
+                // Sort candidates by least loaded first, with random tie-breaker
+                usort($candidates, function($a, $b) use ($reviewer_load) {
+                    $loadA = $reviewer_load[$a] ?? 0;
+                    $loadB = $reviewer_load[$b] ?? 0;
+                    if ($loadA === $loadB) {
+                        return rand(-1, 1);
+                    }
+                    return $loadA <=> $loadB;
+                });
+                
+                $selected = array_slice($candidates, 0, $needed);
+                
+                $insertStmt = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status, is_anonymous) VALUES (?, ?, 'in_progress', 1)");
+                foreach($selected as $reviewer_id) {
+                    $insertStmt->execute([$submission_id, $reviewer_id]);
+                    $reviewer_load[$reviewer_id] = ($reviewer_load[$reviewer_id] ?? 0) + 1;
+                    $assignments_made++;
+                }
+            }
+            
+            $conn->commit();
+            return $assignments_made;
+            
+        } catch (Exception $e) {
+            if ($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+            error_log("assignPeerReviews error: " . $e->getMessage());
+            return false;
         }
-        
-        $conn->commit();
-        return $assignments_made;
-        
-    } catch (Exception $e) {
-        $conn->rollBack();
-        error_log("assignPeerReviews error: " . $e->getMessage());
-        return false;
     }
-}
 
 // Get assignment details for auto-assignment
 public function getAssignmentForReview($assignment_id) {
@@ -272,7 +305,9 @@ public function getAssignmentForReview($assignment_id) {
             $stmt->bindParam(":user_id", $user_id);
             $stmt->bindParam(":course_id", $course_id);
             
-            return $stmt->execute();
+            // Return true only if a row really changed, so the caller does not
+            // report success for a student that was not enrolled.
+            return $stmt->execute() && $stmt->rowCount() > 0;
         } catch (PDOException $e) {
             error_log("updateEnrollmentStatus error: " . $e->getMessage());
             return false;
@@ -333,10 +368,11 @@ public function getAssignmentForReview($assignment_id) {
         }
     }
 
-    // Get assignments for student
-// In functions.php - Update the getStudentAssignments function
+// Get assignments for student
 public function getStudentAssignments($user_id) {
     try {
+        // NOTE: with PDO::ATTR_EMULATE_PREPARES = false a named placeholder may
+        // only appear once. The join condition therefore uses :sub_user_id.
         $query = "SELECT a.*, m.title as module_title, c.title as course_title, c.course_id,
                          s.submission_id, s.status as submission_status, s.final_grade, s.instructor_feedback,
                          s.submission_date, s.file_path, s.file_name
@@ -344,13 +380,14 @@ public function getStudentAssignments($user_id) {
                   JOIN modules m ON a.module_id = m.module_id
                   JOIN courses c ON m.course_id = c.course_id
                   JOIN enrollments e ON c.course_id = e.course_id
-                  LEFT JOIN submissions s ON a.assignment_id = s.assignment_id AND s.student_id = :user_id
+                  LEFT JOIN submissions s ON a.assignment_id = s.assignment_id AND s.student_id = :sub_user_id
                   WHERE e.user_id = :user_id 
                   AND e.enrollment_status = 'approved' 
                   AND a.is_published = TRUE
                   ORDER BY a.due_date";
         
         $stmt = $this->conn->prepare($query);
+        $stmt->bindParam(":sub_user_id", $user_id);
         $stmt->bindParam(":user_id", $user_id);
         $stmt->execute();
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -606,6 +643,22 @@ public function getStudentAssignments($user_id) {
             return $stmt->execute();
         } catch (PDOException $e) {
             error_log("submitAssignment error: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    // Create a new forum for a course
+    public function createForum($course_id, $title, $description = '') {
+        try {
+            $query = "INSERT INTO forums (course_id, title, description, is_locked) 
+                      VALUES (:course_id, :title, :description, 0)";
+            $stmt = $this->conn->prepare($query);
+            $stmt->bindParam(":course_id", $course_id);
+            $stmt->bindParam(":title", $title);
+            $stmt->bindParam(":description", $description);
+            return $stmt->execute();
+        } catch (PDOException $e) {
+            error_log("createForum error: " . $e->getMessage());
             return false;
         }
     }

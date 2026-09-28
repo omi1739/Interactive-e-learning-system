@@ -94,7 +94,7 @@ require_once '../includes/header.php';
                 <?php if($submission['file_path']): ?>
                 <div class="mb-4">
                     <h6>Submitted File</h6>
-                    <a href="<?php echo htmlspecialchars($submission['file_path']); ?>" target="_blank" class="btn btn-outline-primary">
+                    <a href="../download.php?submission_id=<?php echo (int)$submission['submission_id']; ?>" class="btn btn-outline-primary">
                         <i class="fas fa-download"></i> Download File: <?php echo htmlspecialchars($submission['file_name']); ?>
                     </a>
                 </div>
