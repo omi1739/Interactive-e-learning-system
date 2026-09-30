@@ -96,12 +96,101 @@ class Auth
     }
 
     /**
-     * Reason the last login/register attempt failed, for showing to the user.
-     * Returns null when the last attempt succeeded.
+     * Reason the last login/register/changePassword attempt failed, for showing
+     * to the user. Returns null when the last attempt succeeded.
      */
     public function getLastError()
     {
         return $this->last_error;
+    }
+
+    /**
+     * Change the signed-in user's own password.
+     *
+     * The current password is re-verified here so a hijacked or left-open
+     * session cannot lock the real owner out, and the session ID is regenerated
+     * afterwards so a token captured before the change is worthless.
+     *
+     * @return bool True on success; getLastError() explains a failure.
+     */
+    public function changePassword($userId, $currentPassword, $newPassword, $confirmPassword)
+    {
+        $this->last_error = null;
+
+        $userId = (int) $userId;
+
+        if ($userId <= 0) {
+            $this->last_error = 'Your session has expired. Please sign in again.';
+            return false;
+        }
+
+        if ($currentPassword === '' || $newPassword === '' || $confirmPassword === '') {
+            $this->last_error = 'All three password fields are required.';
+            return false;
+        }
+
+        if ($newPassword !== $confirmPassword) {
+            $this->last_error = 'The new password and its confirmation do not match.';
+            return false;
+        }
+
+        if (hash_equals($currentPassword, $newPassword)) {
+            // Not a leak: the user already knows both values they typed.
+            $this->last_error = 'The new password must be different from your current one.';
+            return false;
+        }
+
+        // Same rules as registration so an account cannot be downgraded to a
+        // weaker password than the one it was created with.
+        if (strlen($newPassword) < 8) {
+            $this->last_error = 'Password must be at least 8 characters long.';
+            return false;
+        }
+
+        if (preg_match('/^(.)\1+$/', $newPassword)) {
+            $this->last_error = 'Password must not be a single repeated character.';
+            return false;
+        }
+
+        // bcrypt silently ignores everything past 72 bytes, so a longer
+        // passphrase would have its tail dropped without the user noticing.
+        if (strlen($newPassword) > 72) {
+            $this->last_error = 'Password must be 72 characters or fewer.';
+            return false;
+        }
+
+        try {
+            $stmt = $this->conn->prepare("SELECT password_hash FROM users WHERE user_id = :id LIMIT 1");
+            $stmt->execute([':id' => $userId]);
+            $hash = $stmt->fetchColumn();
+
+            if (!is_string($hash) || $hash === '') {
+                $this->last_error = 'Your account could not be loaded.';
+                return false;
+            }
+
+            if (!password_verify($currentPassword, $hash)) {
+                $this->last_error = 'Your current password is incorrect.';
+                return false;
+            }
+
+            $update = $this->conn->prepare("UPDATE users SET password_hash = :hash WHERE user_id = :id");
+            $update->execute([
+                ':hash' => password_hash($newPassword, PASSWORD_DEFAULT),
+                ':id'   => $userId,
+            ]);
+        } catch (PDOException $e) {
+            error_log("Password change error: " . $e->getMessage());
+            $this->last_error = 'The password could not be changed. Please try again.';
+            return false;
+        }
+
+        // Drop any session id captured before the change.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_regenerate_id(true);
+        }
+
+        return true;
     }
 
     /**
@@ -134,7 +223,16 @@ class Auth
             $stmt->bindParam(":email", $email);
             $stmt->execute();
 
-            if ($stmt->fetchColumn() !== 1) {
+            // One fetch, one row. The previous version called fetchColumn() to
+            // test for existence and then fetch() to read the row, which broke
+            // two ways: fetchColumn() compares the first column (user_id)
+            // against 1, so every account whose id was not 1 was rejected as
+            // unknown; and it advances the PDO cursor, so the following
+            // fetch() could return false and the next line would dereference
+            // it. $user === null is the actual existence test.
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$user) {
                 // Constant-ish work factor so a missing account and a wrong
                 // password take comparable time, and the same generic message
                 // is returned for both.
@@ -143,8 +241,6 @@ class Auth
                 error_log("Failed login attempt for unknown email: " . $email);
                 return false;
             }
-
-            $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!password_verify($password, $user['password_hash'])) {
                 error_log("Failed login attempt for email: " . $email);
@@ -373,6 +469,7 @@ class Auth
 
         $home = function_exists('app_url') ? app_url('dashboard.php') : 'dashboard.php';
         $css  = function_exists('asset_url') ? asset_url('css/app.css') : '';
+        $boot = function_exists('asset_url') ? asset_url('vendor/bootstrap/bootstrap.min.css') : '';
         $esc  = function_exists('e') ? 'e' : 'htmlspecialchars';
 
         ?>
@@ -382,7 +479,7 @@ class Auth
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Access denied</title>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+            <link rel="stylesheet" href="<?php echo $esc($boot); ?>">
             <?php if ($css !== ''): ?>
                 <link rel="stylesheet" href="<?php echo $esc($css); ?>">
             <?php endif; ?>

@@ -74,6 +74,22 @@ if($_POST && isset($_POST['update_profile'])) {
     }
 }
 
+// Handle password change. A separate submit button from the profile form
+// above, because the two write different columns and have different rules.
+if($_POST && isset($_POST['change_password'])) {
+    verify_csrf();
+
+    $current_password = (string)($_POST['current_password'] ?? '');
+    $new_password = (string)($_POST['new_password'] ?? '');
+    $confirm_password = (string)($_POST['confirm_password'] ?? '');
+
+    if($auth->changePassword($user_id, $current_password, $new_password, $confirm_password)) {
+        $success = "Password changed. Use it the next time you sign in.";
+    } else {
+        $error = $auth->getLastError() ?: "The password could not be changed.";
+    }
+}
+
 // Account statistics, computed without per-course round trips.
 $stats = [];
 if($role === 'student') {
@@ -230,6 +246,42 @@ echo ui_page_header(
                     <?php echo ui_detail_row('Member since', e(ui_date($user_profile['created_at'] ?? null, 'M j, Y', 'Unknown'))); ?>
                     <?php echo ui_detail_row('Last sign-in', e(ui_datetime($user_profile['last_login'] ?? null, 'M j, Y g:i A', 'First sign-in'))); ?>
                 </dl>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="h6 mb-0">Password</h2>
+            </div>
+            <div class="card-body">
+                <form method="POST" novalidate autocomplete="off">
+                    <?php echo csrf_field(); ?>
+
+                    <div class="mb-3">
+                        <label for="current_password" class="form-label">Current password</label>
+                        <input type="password" class="form-control" id="current_password"
+                               name="current_password" required autocomplete="current-password">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="new_password" class="form-label">New password</label>
+                        <input type="password" class="form-control" id="new_password"
+                               name="new_password" required minlength="8" autocomplete="new-password">
+                        <div class="form-text">
+                            At least 8 characters, and not a single repeated character.
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="confirm_password" class="form-label">Confirm new password</label>
+                        <input type="password" class="form-control" id="confirm_password"
+                               name="confirm_password" required minlength="8" autocomplete="new-password">
+                    </div>
+
+                    <button type="submit" name="change_password" class="btn btn-primary">
+                        <i class="fas fa-key me-1" aria-hidden="true"></i> Change password
+                    </button>
+                </form>
             </div>
         </div>
 
