@@ -14,9 +14,9 @@ $db = new Database();
 $conn = $db->getConnection();
 
 // Get course details and verify ownership
-$stmt = $conn->prepare("SELECT c.*, u.first_name, u.last_name 
-                       FROM courses c 
-                       JOIN users u ON c.instructor_id = u.user_id 
+$stmt = $conn->prepare("SELECT c.*, u.first_name, u.last_name
+                       FROM courses c
+                       JOIN users u ON c.instructor_id = u.user_id
                        WHERE c.course_id = ? AND c.instructor_id = ?");
 $stmt->execute([$course_id, $_SESSION['user_id']]);
 $course = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -25,21 +25,19 @@ if(!$course) {
     $auth->redirect('courses.php');
 }
 
-// Get enrolled students - FIXED: Direct query
-$stmt = $conn->prepare("SELECT u.user_id, u.first_name, u.last_name, u.email, u.username, 
-                               e.enrollment_status, e.enrolled_at, e.grade
-                        FROM enrollments e 
-                        JOIN users u ON e.user_id = u.user_id 
-                        WHERE e.course_id = ?
-                        ORDER BY e.enrolled_at DESC");
-$stmt->execute([$course_id]);
-$course_students = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// Everything below is scoped to $course_id, which is ownership-checked
+// above, so no handler here can reach another instructor's roster or forums.
 
-// Handle enrollment status update - FIXED: Proper handling
+$form_email = '';
+$form_forum_title = '';
+$form_forum_desc = '';
+$reopen = '';
+
+// Handle enrollment status update
 if($_POST && isset($_POST['update_status'])) {
     verify_csrf();
     $user_id = intval($_POST['user_id'] ?? 0);
-    $status = $_POST['status'] ?? '';
+    $status = (string)($_POST['status'] ?? '');
 
     // Only accept statuses that exist in the enrollment_status ENUM. An
     // unvalidated value would be truncated by MySQL or rejected outright.
@@ -51,356 +49,440 @@ if($_POST && isset($_POST['update_status'])) {
     } else {
         // course_id is ownership-checked above, so this update cannot reach
         // another instructor's roster.
-        $update_stmt = $conn->prepare("UPDATE enrollments SET enrollment_status = ? WHERE user_id = ? AND course_id = ?");
-        if($update_stmt->execute([$status, $user_id, $course_id]) && $update_stmt->rowCount() > 0) {
-            $_SESSION['success'] = "Enrollment status updated successfully!";
-            header("Location: course_manage.php?id=" . (int)$course_id);
+        //
+        // Success is judged on execute(), not rowCount(): re-selecting the
+        // status a student already has is a legitimate no-op that MySQL
+        // reports as 0 affected rows, and the old code turned that into a
+        // "Failed to update enrollment status." error.
+        $update_stmt = $conn->prepare("UPDATE enrollments
+                                       SET enrollment_status = ?
+                                       WHERE user_id = ? AND course_id = ?");
+        if($update_stmt->execute([$status, $user_id, $course_id])) {
+            $name_stmt = $conn->prepare("SELECT first_name, last_name FROM users WHERE user_id = ?");
+            $name_stmt->execute([$user_id]);
+            $who = $name_stmt->fetch(PDO::FETCH_ASSOC);
+
+            $label = $who ? ui_user_name($who) : 'Student';
+            $message = "Enrollment status for " . $label . " is now " . $status . ".";
+
+            // Only 'approved' grants access, so say so when access changes.
+            if($status === 'approved') {
+                $message .= " They can now open the course.";
+            } elseif(in_array($status, ['rejected', 'completed'], true)) {
+                $message .= " This revokes their access to the course, its assignments and its forums.";
+            }
+
+            $_SESSION['success'] = $message;
+            header("Location: course_manage.php?id=" . $course_id);
             exit();
-        } else {
-            $_SESSION['error'] = "Failed to update enrollment status.";
         }
+        $_SESSION['error'] = "Failed to update enrollment status.";
     }
 }
 
 // Handle manual enrollment
 if($_POST && isset($_POST['enroll_student'])) {
     verify_csrf();
-    $student_email = trim($_POST['student_email']);
-    
-    if(!empty($student_email)) {
+    // Without ?? '' a crafted POST omitting the field raises an
+    // undefined-key warning and passes null to trim().
+    $form_email = trim((string)($_POST['student_email'] ?? ''));
+
+    if($form_email === '') {
+        $_SESSION['error'] = "Please enter a student email address.";
+        $reopen = 'enrollStudentModal';
+    } else {
         $stmt = $conn->prepare("SELECT user_id FROM users WHERE email = ? AND role = 'student'");
-        $stmt->execute([$student_email]);
+        $stmt->execute([$form_email]);
         $student = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if($student) {
-            $check_stmt = $conn->prepare("SELECT * FROM enrollments WHERE user_id = ? AND course_id = ?");
+
+        if(!$student) {
+            $_SESSION['error'] = "No student account found with that email address.";
+            $reopen = 'enrollStudentModal';
+        } else {
+            $check_stmt = $conn->prepare("SELECT enrollment_status FROM enrollments
+                                         WHERE user_id = ? AND course_id = ?");
             $check_stmt->execute([$student['user_id'], $course_id]);
-            
-            if($check_stmt->rowCount() > 0) {
-                $_SESSION['error'] = "Student is already enrolled in this course.";
-            } else {
-                $enroll_stmt = $conn->prepare("INSERT INTO enrollments (user_id, course_id, enrollment_status) VALUES (?, ?, 'approved')");
-                if($enroll_stmt->execute([$student['user_id'], $course_id])) {
-                    $_SESSION['success'] = "Student enrolled successfully!";
-                    header("Location: course_manage.php?id=" . $course_id);
-                    exit();
+            $existing = $check_stmt->fetch(PDO::FETCH_ASSOC);
+
+            if($existing) {
+                // A rejected enrollment still occupies the unique user/course
+                // key, so re-enrolling has to update the row rather than
+                // insert, or the instructor is stuck with a rejected student
+                // they can never add again.
+                if($existing['enrollment_status'] === 'rejected') {
+                    $re_enroll = $conn->prepare("UPDATE enrollments
+                                                SET enrollment_status = 'approved', enrolled_at = NOW()
+                                                WHERE user_id = ? AND course_id = ?");
+                    if($re_enroll->execute([$student['user_id'], $course_id])) {
+                        $_SESSION['success'] = "Student re-enrolled and approved.";
+                        header("Location: course_manage.php?id=" . $course_id);
+                        exit();
+                    }
+                    $_SESSION['error'] = "Failed to re-enroll student.";
                 } else {
+                    $_SESSION['error'] = "That student is already enrolled ("
+                        . $existing['enrollment_status'] . "). Change the status in the table below instead.";
+                }
+                $reopen = 'enrollStudentModal';
+            } else {
+                // Manual enrollment approves immediately, so honour capacity
+                // here. The page advertises max_students but nothing ever
+                // checked it, so a course could be pushed well over its limit.
+                $capacity = (int)$course['max_students'];
+                $count_stmt = $conn->prepare("SELECT COUNT(*) FROM enrollments
+                                              WHERE course_id = ? AND enrollment_status IN ('approved','completed')");
+                $count_stmt->execute([$course_id]);
+                $seats_taken = (int)$count_stmt->fetchColumn();
+
+                if($capacity > 0 && $seats_taken >= $capacity) {
+                    $_SESSION['error'] = "This course is at its capacity of {$capacity} students. "
+                        . "Raise the limit on the Edit course page, or set a status on the pending requests below.";
+                    $reopen = 'enrollStudentModal';
+                } else {
+                    $enroll_stmt = $conn->prepare("INSERT INTO enrollments (user_id, course_id, enrollment_status)
+                                                  VALUES (?, ?, 'approved')");
+                    if($enroll_stmt->execute([$student['user_id'], $course_id])) {
+                        $_SESSION['success'] = "Student enrolled and approved.";
+                        header("Location: course_manage.php?id=" . $course_id);
+                        exit();
+                    }
                     $_SESSION['error'] = "Failed to enroll student.";
+                    $reopen = 'enrollStudentModal';
                 }
             }
-        } else {
-            $_SESSION['error'] = "No student found with that email address.";
         }
-    } else {
-        $_SESSION['error'] = "Please enter a student email address.";
     }
 }
 
 // Handle forum creation
 if($_POST && isset($_POST['create_forum'])) {
     verify_csrf();
-    $forum_title = trim($_POST['forum_title'] ?? '');
-    $forum_desc = trim($_POST['forum_desc'] ?? '');
-    if(!empty($forum_title)) {
-        if($functions->createForum($course_id, $forum_title, $forum_desc)) {
-            $_SESSION['success'] = "Discussion forum created successfully!";
+    $form_forum_title = trim((string)($_POST['forum_title'] ?? ''));
+    $form_forum_desc = trim((string)($_POST['forum_desc'] ?? ''));
+
+    if($form_forum_title === '') {
+        $_SESSION['error'] = "Forum title is required.";
+        $reopen = 'createForumModal';
+    } elseif(mb_strlen($form_forum_title) > 200) {
+        $_SESSION['error'] = "Forum title must be 200 characters or fewer.";
+        $reopen = 'createForumModal';
+    } else {
+        if($functions->createForum($course_id, $form_forum_title, $form_forum_desc)) {
+            $_SESSION['success'] = "Discussion forum created.";
             header("Location: course_manage.php?id=" . $course_id);
             exit();
-        } else {
-            $_SESSION['error'] = "Failed to create forum.";
         }
-    } else {
-        $_SESSION['error'] = "Forum title is required.";
+        $_SESSION['error'] = "Failed to create forum.";
+        $reopen = 'createForumModal';
     }
 }
 
 // Get success/error messages from session
 $success = $_SESSION['success'] ?? '';
 $error = $_SESSION['error'] ?? '';
-unset($_SESSION['success']);
-unset($_SESSION['error']);
+unset($_SESSION['success'], $_SESSION['error']);
 
 // Get course forums
 $course_forums = $functions->getCourseForums($course_id);
 
+// Get enrolled students
+$stmt = $conn->prepare("SELECT u.user_id, u.first_name, u.last_name, u.email, u.username,
+                               e.enrollment_status, e.enrolled_at, e.grade
+                        FROM enrollments e
+                        JOIN users u ON e.user_id = u.user_id
+                        WHERE e.course_id = ?
+                        ORDER BY FIELD(e.enrollment_status, 'pending', 'approved', 'completed', 'rejected'),
+                                 e.enrolled_at DESC");
+$stmt->execute([$course_id]);
+$course_students = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
 // Get course statistics
+$by_status = ['approved' => 0, 'pending' => 0, 'rejected' => 0, 'completed' => 0];
+foreach($course_students as $student) {
+    $s = (string)($student['enrollment_status'] ?? '');
+    if(isset($by_status[$s])) {
+        $by_status[$s]++;
+    }
+}
 $total_students = count($course_students);
-$approved_students = count(array_filter($course_students, function($student) {
-    return $student['enrollment_status'] == 'approved';
-}));
-$pending_students = count(array_filter($course_students, function($student) {
-    return $student['enrollment_status'] == 'pending';
-}));
+$approved_students = $by_status['approved'];
+$pending_students = $by_status['pending'];
+$capacity = (int)$course['max_students'];
+
+// Seats are consumed by approved and completed students, because only
+// 'approved' is treated as access elsewhere in the app.
+$seats_taken = $approved_students + $by_status['completed'];
+$seats_left = $capacity > 0 ? max(0, $capacity - $seats_taken) : null;
+$is_published = (int)$course['is_published'] === 1;
 
 require_once '../includes/header.php';
 ?>
 
-<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <div>
-        <h1 class="h2 mb-1">Manage Course: <?php echo htmlspecialchars($course['title']); ?></h1>
-        <p class="text-muted mb-0">Code: <code><?php echo htmlspecialchars($course['course_code']); ?></code></p>
-    </div>
-    <div class="btn-toolbar mb-2 mb-md-0 gap-2">
-        <a href="course_edit.php?id=<?php echo $course_id; ?>" class="btn btn-outline-primary">
-            <i class="fas fa-edit me-1"></i> Edit Curriculum & Modules
-        </a>
-        <button class="btn btn-outline-success" data-bs-toggle="modal" data-bs-target="#createForumModal">
-            <i class="fas fa-comments me-1"></i> Add Forum
-        </button>
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#enrollStudentModal">
-            <i class="fas fa-user-plus me-1"></i> Enroll Student
-        </button>
-    </div>
-</div>
+<?php
+$actions = '<a href="course_edit.php?id=' . $course_id . '" class="btn btn-outline-primary">'
+    . '<i class="fas fa-edit me-1" aria-hidden="true"></i> Edit curriculum &amp; modules</a>'
+    . ' <button class="btn btn-outline-success" data-bs-toggle="modal" data-bs-target="#createForumModal">'
+    . '<i class="fas fa-comments me-1" aria-hidden="true"></i> Add forum</button>'
+    . ' <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#enrollStudentModal">'
+    . '<i class="fas fa-user-plus me-1" aria-hidden="true"></i> Enroll student</button>';
+
+echo ui_page_header(
+    $course['title'],
+    'Code ' . $course['course_code'] . ' - manage roster and forums',
+    $actions,
+    'Teaching'
+);
+?>
+
+<?php echo ui_breadcrumbs([
+    ['label' => 'My courses', 'url' => 'courses.php'],
+    ['label' => $course['course_code']],
+], 'Dashboard', 'dashboard.php'); ?>
 
 <?php if(!empty($success)): ?>
-<div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo e($success); ?>
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+<div class="alert alert-success alert-dismissible fade show" role="alert" data-autodismiss="8000">
+    <i class="fas fa-check-circle me-1" aria-hidden="true"></i> <?php echo e($success); ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss"></button>
 </div>
 <?php endif; ?>
 
 <?php if(!empty($error)): ?>
 <div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo e($error); ?>
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    <i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i> <?php echo e($error); ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss"></button>
 </div>
 <?php endif; ?>
 
-<div class="row">
-    <div class="col-md-3">
-        <div class="card text-white bg-primary mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title"><?php echo $total_students; ?></h4>
-                        <p class="card-text">Total Students</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-users fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
+<div class="row g-3 mb-4">
+    <div class="col-6 col-xl-3">
+        <?php echo ui_stat('Enrolled', (string)$seats_taken, 'fa-users', 'brand',
+            $capacity > 0 ? 'of ' . $capacity . ' seats taken' : 'No capacity limit set'); ?>
     </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-success mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title"><?php echo $approved_students; ?></h4>
-                        <p class="card-text">Approved</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-check-circle fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div class="col-6 col-xl-3">
+        <?php echo ui_stat('Pending', (string)$pending_students, 'fa-clock', 'warning',
+            $pending_students > 0 ? 'Waiting on your approval' : 'No requests waiting'); ?>
     </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-warning mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title"><?php echo $pending_students; ?></h4>
-                        <p class="card-text">Pending</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-clock fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div class="col-6 col-xl-3">
+        <?php echo ui_stat('Forums', (string)count($course_forums), 'fa-comments', 'info',
+            count($course_forums) > 0 ? 'Discussion spaces' : 'None created yet'); ?>
     </div>
-    
-    <div class="col-md-3">
-        <div class="card text-white bg-info mb-3">
-            <div class="card-body">
-                <div class="d-flex justify-content-between">
-                    <div>
-                        <h4 class="card-title"><?php echo $course['max_students']; ?></h4>
-                        <p class="card-text">Capacity</p>
-                    </div>
-                    <div class="align-self-center">
-                        <i class="fas fa-chart-line fa-2x"></i>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div class="col-6 col-xl-3">
+        <?php echo ui_stat('Visibility', $is_published ? 'Published' : 'Draft',
+            $is_published ? 'fa-circle-check' : 'fa-pen', $is_published ? 'success' : 'warning',
+            $is_published ? 'Visible in the student catalogue' : 'Hidden from students'); ?>
     </div>
 </div>
 
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">
-                    <i class="fas fa-users"></i> Enrolled Students
-                    <span class="badge bg-primary"><?php echo $total_students; ?> students</span>
-                </h5>
+<?php if($capacity > 0 && $seats_taken > $capacity): ?>
+<div class="alert alert-warning" role="alert">
+    <i class="fas fa-triangle-exclamation me-1" aria-hidden="true"></i>
+    This course has <strong><?php echo $seats_taken; ?></strong> students enrolled but a capacity of
+    <strong><?php echo $capacity; ?></strong>. Raise the limit on the
+    <a href="course_edit.php?id=<?php echo $course_id; ?>">Edit course</a> page, or reject an enrollment below.
+</div>
+<?php endif; ?>
+
+<?php if(!$is_published): ?>
+<div class="alert alert-info" role="alert">
+    <i class="fas fa-eye-slash me-1" aria-hidden="true"></i>
+    This course is a <strong>draft</strong>, so students cannot find or enrol in it. Publish it from
+    <a href="course_edit.php?id=<?php echo $course_id; ?>">Edit course</a>.
+</div>
+<?php endif; ?>
+
+<!-- Enrolled Students -->
+<div class="card mb-4">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <h2 class="h5 mb-0">
+            <i class="fas fa-users me-1" aria-hidden="true"></i> Enrolled students
+        </h2>
+        <?php echo ui_badge((string)$total_students . ' total', 'neutral'); ?>
+    </div>
+    <div class="card-body">
+        <?php if($total_students > 0): ?>
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <caption class="visually-hidden">
+                        Students enrolled in <?php echo e($course['title']); ?>, with enrollment status
+                    </caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Student</th>
+                            <th scope="col">Username</th>
+                            <th scope="col">Enrolled</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Course grade</th>
+                            <th scope="col">Change status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach($course_students as $student): ?>
+                        <tr>
+                            <td>
+                                <div class="d-flex align-items-center gap-2">
+                                    <?php echo ui_avatar($student['first_name'], $student['last_name'], 'sm'); ?>
+                                    <div class="min-w-0">
+                                        <div class="fw-semibold text-truncate"><?php echo e(ui_user_name($student)); ?></div>
+                                        <div class="small text-muted text-truncate"><?php echo e($student['email']); ?></div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="text-muted small">@<?php echo e($student['username']); ?></td>
+                            <td class="text-nowrap small text-muted">
+                                <?php echo e(ui_date($student['enrolled_at'], 'M j, Y', 'Unknown')); ?>
+                            </td>
+                            <td><?php echo ui_status_badge($student['enrollment_status']); ?></td>
+                            <td>
+                                <?php // enrollments.grade is not written anywhere in
+                                      // the application, and nothing defines it as a
+                                      // percentage. The old markup appended "%",
+                                      // which asserted a unit the column does not
+                                      // carry, so it is shown as a plain number. ?>
+                                <?php if($student['grade'] !== null && $student['grade'] !== ''): ?>
+                                    <?php echo ui_num($student['grade']); ?>
+                                <?php else: ?>
+                                    <span class="text-muted">&mdash;</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <form method="POST" class="d-flex align-items-center gap-2" data-auto-submit>
+                                    <?php echo csrf_field(); ?>
+                                    <?php // onchange="this.form.submit()" does not carry a
+                                          // submit button's name/value, so the action flag
+                                          // has to be a hidden field or the status is
+                                          // never saved. ?>
+                                    <input type="hidden" name="update_status" value="1">
+                                    <input type="hidden" name="user_id" value="<?php echo (int)$student['user_id']; ?>">
+                                    <label class="visually-hidden" for="status_<?php echo (int)$student['user_id']; ?>">
+                                        Status for <?php echo e(ui_user_name($student)); ?>
+                                    </label>
+                                    <select name="status" id="status_<?php echo (int)$student['user_id']; ?>"
+                                            class="form-select form-select-sm" data-auto-submit>
+                                        <?php foreach(['pending', 'approved', 'rejected', 'completed'] as $opt): ?>
+                                            <option value="<?php echo $opt; ?>"
+                                                <?php echo $student['enrollment_status'] === $opt ? 'selected' : ''; ?>>
+                                                <?php echo ucfirst($opt); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <button type="submit" class="btn btn-sm btn-outline-secondary">Save</button>
+                                </form>
+                                <div class="small text-muted mt-1">
+                                    Only <strong>approved</strong> gives access to the course.
+                                </div>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
-            <div class="card-body">
-                <?php if(count($course_students) > 0): ?>
-                    <div class="table-responsive">
-                        <table class="table table-striped">
-                            <thead>
-                                <tr>
-                                    <th>Student</th>
-                                    <th>Email</th>
-                                    <th>Username</th>
-                                    <th>Enrollment Date</th>
-                                    <th>Status</th>
-                                    <th>Grade</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach($course_students as $student): ?>
-                                <tr>
-                                    <td>
-                                        <strong><?php echo htmlspecialchars($student['first_name'] . ' ' . $student['last_name']); ?></strong>
-                                    </td>
-                                    <td><?php echo htmlspecialchars($student['email']); ?></td>
-                                    <td><?php echo htmlspecialchars($student['username']); ?></td>
-                                    <td><?php echo date('M j, Y', strtotime($student['enrolled_at'])); ?></td>
-                                    <td>
-                                        <span class="badge bg-<?php 
-                                            switch($student['enrollment_status']) {
-                                                case 'approved': echo 'success'; break;
-                                                case 'pending': echo 'warning'; break;
-                                                case 'rejected': echo 'danger'; break;
-                                                case 'completed': echo 'info'; break;
-                                                default: echo 'secondary';
-                                            }
-                                        ?>">
-                                            <?php echo ucfirst($student['enrollment_status']); ?>
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <?php if($student['grade'] !== null): ?>
-                                            <strong><?php echo htmlspecialchars($student['grade']); ?>%</strong>
-                                        <?php else: ?>
-                                            <span class="text-muted">-</span>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td>
-                                        <form method="POST" class="d-inline">
-                                            <?php echo csrf_field(); ?>
-                                            <input type="hidden" name="user_id" value="<?php echo $student['user_id']; ?>">
-                                            <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
-                                                <option value="pending" <?php echo $student['enrollment_status'] == 'pending' ? 'selected' : ''; ?>>Pending</option>
-                                                <option value="approved" <?php echo $student['enrollment_status'] == 'approved' ? 'selected' : ''; ?>>Approved</option>
-                                                <option value="rejected" <?php echo $student['enrollment_status'] == 'rejected' ? 'selected' : ''; ?>>Rejected</option>
-                                                <option value="completed" <?php echo $student['enrollment_status'] == 'completed' ? 'selected' : ''; ?>>Completed</option>
-                                            </select>
-                                            <?php // onchange="this.form.submit()" does NOT include a submit
-                                                  // button's name/value, so the action flag must be a
-                                                  // hidden field or the status is never saved. ?>
-                                            <input type="hidden" name="update_status" value="1">
-                                        </form>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php else: ?>
-                    <div class="text-center py-4">
-                        <i class="fas fa-users fa-3x text-muted mb-3"></i>
-                        <h5 class="text-muted">No Students Enrolled</h5>
-                        <p class="text-muted">No students have enrolled in this course yet.</p>
-                        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#enrollStudentModal">
-                            <i class="fas fa-user-plus"></i> Enroll First Student
-                        </button>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
+        <?php else: ?>
+            <?php
+            echo ui_empty_state(
+                'fa-users',
+                'No students enrolled',
+                'Enrol an existing account by email, or wait for students to request a place from the catalogue.',
+                '<button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#enrollStudentModal">'
+                    . '<i class="fas fa-user-plus me-1" aria-hidden="true"></i> Enrol the first student</button>'
+            );
+            ?>
+        <?php endif; ?>
     </div>
 </div>
 
-<!-- Discussion Forums Section -->
-<div class="row mt-4">
-    <div class="col-12">
-        <div class="card shadow-sm border-0">
-            <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center">
-                <h5 class="card-title mb-0 fw-bold">
-                    <i class="fas fa-comments text-success me-2"></i> Course Discussion Forums
-                    <span class="badge bg-success ms-2"><?php echo count($course_forums); ?> forums</span>
-                </h5>
-                <button class="btn btn-sm btn-outline-success" data-bs-toggle="modal" data-bs-target="#createForumModal">
-                    <i class="fas fa-plus me-1"></i> Add Forum
-                </button>
+<!-- Discussion Forums -->
+<div class="card">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <h2 class="h5 mb-0">
+            <i class="fas fa-comments me-1" aria-hidden="true"></i> Discussion forums
+        </h2>
+        <button class="btn btn-sm btn-outline-success" data-bs-toggle="modal" data-bs-target="#createForumModal">
+            <i class="fas fa-plus me-1" aria-hidden="true"></i> Add forum
+        </button>
+    </div>
+    <div class="card-body">
+        <?php if(count($course_forums) > 0): ?>
+            <div class="table-responsive">
+                <table class="table align-middle">
+                    <caption class="visually-hidden">Discussion forums in <?php echo e($course['title']); ?></caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Forum</th>
+                            <th scope="col">Posts</th>
+                            <th scope="col">Last activity</th>
+                            <th scope="col"><span class="visually-hidden">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach($course_forums as $forum): ?>
+                        <tr>
+                            <td>
+                                <div class="fw-semibold"><?php echo e($forum['title']); ?></div>
+                                <div class="small text-muted">
+                                    <?php echo e(ui_truncate($forum['description'] ?? 'No description', 110)); ?>
+                                </div>
+                            </td>
+                            <td><?php echo ui_badge((int)($forum['post_count'] ?? 0) . ' posts', 'neutral'); ?></td>
+                            <td class="text-nowrap small text-muted">
+                                <?php echo e(ui_date($forum['last_activity'] ?? null, 'M j, Y', 'Never')); ?>
+                            </td>
+                            <td class="text-end">
+                                <?php // rel="noopener" stops the opened tab from
+                                      // reaching back through window.opener. ?>
+                                <a href="../student/forum_view.php?id=<?php echo (int)$forum['forum_id']; ?>"
+                                   class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener">
+                                    View forum
+                                    <span class="visually-hidden">
+                                        <?php echo e($forum['title']); ?> (opens in a new tab)
+                                    </span>
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
-            <div class="card-body">
-                <?php if(count($course_forums) > 0): ?>
-                    <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead>
-                                <tr>
-                                    <th>Forum Title</th>
-                                    <th>Description</th>
-                                    <th>Topics / Posts</th>
-                                    <th>Last Activity</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach($course_forums as $forum): ?>
-                                <tr>
-                                    <td>
-                                        <strong><?php echo htmlspecialchars($forum['title']); ?></strong>
-                                    </td>
-                                    <td><?php echo htmlspecialchars($forum['description'] ?? 'No description'); ?></td>
-                                    <td><span class="badge bg-secondary"><?php echo $forum['post_count'] ?? 0; ?> posts</span></td>
-                                    <td><?php echo !empty($forum['last_activity']) ? date('M j, Y', strtotime($forum['last_activity'])) : 'Never'; ?></td>
-                                    <td>
-                                        <a href="../student/forum_view.php?id=<?php echo $forum['forum_id']; ?>" class="btn btn-outline-primary btn-sm" target="_blank">
-                                            <i class="fas fa-external-link-alt me-1"></i> View Forum
-                                        </a>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php else: ?>
-                    <div class="text-center py-4">
-                        <i class="fas fa-comments fa-2x text-muted mb-2"></i>
-                        <p class="text-muted mb-2">No discussion forums created for this course yet.</p>
-                        <button class="btn btn-outline-success btn-sm" data-bs-toggle="modal" data-bs-target="#createForumModal">
-                            <i class="fas fa-plus me-1"></i> Create First Forum
-                        </button>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
+        <?php else: ?>
+            <?php
+            echo ui_empty_state(
+                'fa-comments',
+                'No forums yet',
+                'Create a discussion space so students can ask questions outside the assignment flow.',
+                '<button class="btn btn-outline-success" data-bs-toggle="modal" data-bs-target="#createForumModal">'
+                    . '<i class="fas fa-plus me-1" aria-hidden="true"></i> Create the first forum</button>'
+            );
+            ?>
+        <?php endif; ?>
     </div>
 </div>
 
 <!-- Enroll Student Modal -->
-<div class="modal fade" id="enrollStudentModal" tabindex="-1">
+<div class="modal fade" id="enrollStudentModal" tabindex="-1" aria-labelledby="enrollStudentLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Enroll Student</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
             <form method="POST">
                 <?php echo csrf_field(); ?>
+                <div class="modal-header">
+                    <h2 class="modal-title h5" id="enrollStudentLabel">Enrol a student</h2>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
                 <div class="modal-body">
                     <div class="mb-3">
-                        <label for="student_email" class="form-label">Student Email Address</label>
-                        <input type="email" class="form-control" id="student_email" name="student_email" placeholder="Enter student's email address" required>
-                        <div class="form-text">The student must have an existing account in the system.</div>
+                        <label for="student_email" class="form-label">Student email address</label>
+                        <input type="email" class="form-control" id="student_email" name="student_email" required
+                               autocomplete="off" placeholder="student@example.com"
+                               value="<?php echo ui_form_value('student_email', $form_email); ?>">
+                        <div class="form-text">
+                            The student must already have an account. They are enrolled and approved immediately.
+                            <?php if($seats_left !== null): ?>
+                                <strong><?php echo $seats_left; ?></strong> of <?php echo $capacity; ?> seats left.
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" name="enroll_student" class="btn btn-primary">Enroll Student</button>
+                    <button type="submit" name="enroll_student" class="btn btn-primary">Enrol student</button>
                 </div>
             </form>
         </div>
@@ -408,32 +490,44 @@ require_once '../includes/header.php';
 </div>
 
 <!-- Create Forum Modal -->
-<div class="modal fade" id="createForumModal" tabindex="-1">
+<div class="modal fade" id="createForumModal" tabindex="-1" aria-labelledby="createForumLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Create Discussion Forum</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
             <form method="POST">
                 <?php echo csrf_field(); ?>
+                <div class="modal-header">
+                    <h2 class="modal-title h5" id="createForumLabel">Create a discussion forum</h2>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
                 <div class="modal-body">
                     <div class="mb-3">
-                        <label for="forum_title" class="form-label fw-bold">Forum Title <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="forum_title" name="forum_title" placeholder="e.g. General Course Discussion" required>
+                        <label for="forum_title" class="form-label">Forum title <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="forum_title" name="forum_title" required
+                               maxlength="200" placeholder="General course discussion"
+                               value="<?php echo ui_form_value('forum_title', $form_forum_title); ?>">
                     </div>
                     <div class="mb-3">
-                        <label for="forum_desc" class="form-label fw-bold">Description / Guidelines</label>
-                        <textarea class="form-control" id="forum_desc" name="forum_desc" rows="3" placeholder="Explain the purpose of this discussion space..."></textarea>
+                        <label for="forum_desc" class="form-label">Description or guidelines</label>
+                        <textarea class="form-control" id="forum_desc" name="forum_desc" rows="3"
+                                  placeholder="What is this space for?"><?php echo ui_textarea_value($form_forum_desc); ?></textarea>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" name="create_forum" class="btn btn-success">Create Forum</button>
+                    <button type="submit" name="create_forum" class="btn btn-success">Create forum</button>
                 </div>
             </form>
         </div>
     </div>
 </div>
+
+<?php if($reopen !== ''): ?>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var el = document.getElementById(<?php echo json_encode($reopen); ?>);
+    if (el) { new bootstrap.Modal(el).show(); }
+});
+</script>
+<?php endif; ?>
 
 <?php require_once '../includes/footer.php'; ?>
