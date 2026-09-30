@@ -104,7 +104,26 @@ CREATE TABLE `lessons` (
     CONSTRAINT `fk_lessons_module` FOREIGN KEY (`module_id`) REFERENCES `modules` (`module_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 6. Assignments Table
+-- 6. Lesson Progress Table
+-- One row per student per lesson, created when they first mark it, so
+-- completion is a flag flip rather than an insert-and-delete. See
+-- database/migrations/001_lesson_progress.sql for the upgrade path.
+CREATE TABLE `lesson_progress` (
+    `progress_id` INT AUTO_INCREMENT PRIMARY KEY,
+    `user_id` INT NOT NULL,
+    `lesson_id` INT NOT NULL,
+    `is_completed` TINYINT(1) NOT NULL DEFAULT 0,
+    `completed_at` DATETIME DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY `unique_user_lesson` (`user_id`, `lesson_id`),
+    KEY `idx_lesson_progress_user` (`user_id`),
+    KEY `idx_lesson_progress_lesson` (`lesson_id`),
+    CONSTRAINT `fk_lesson_progress_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_lesson_progress_lesson` FOREIGN KEY (`lesson_id`) REFERENCES `lessons` (`lesson_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 7. Assignments Table
 CREATE TABLE `assignments` (
     `assignment_id` INT AUTO_INCREMENT PRIMARY KEY,
     `module_id` INT NOT NULL,
@@ -122,7 +141,7 @@ CREATE TABLE `assignments` (
     CONSTRAINT `fk_assignments_module` FOREIGN KEY (`module_id`) REFERENCES `modules` (`module_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 7. Submissions Table
+-- 8. Submissions Table
 CREATE TABLE `submissions` (
     `submission_id` INT AUTO_INCREMENT PRIMARY KEY,
     `assignment_id` INT NOT NULL,
@@ -140,7 +159,7 @@ CREATE TABLE `submissions` (
     CONSTRAINT `fk_submissions_student` FOREIGN KEY (`student_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 8. Rubrics Table
+-- 9. Rubrics Table
 CREATE TABLE `rubrics` (
     `rubric_id` INT AUTO_INCREMENT PRIMARY KEY,
     `assignment_id` INT NOT NULL,
@@ -153,7 +172,7 @@ CREATE TABLE `rubrics` (
     CONSTRAINT `fk_rubrics_assignment` FOREIGN KEY (`assignment_id`) REFERENCES `assignments` (`assignment_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 9. Peer Reviews Table
+-- 10. Peer Reviews Table
 CREATE TABLE `peer_reviews` (
     `review_id` INT AUTO_INCREMENT PRIMARY KEY,
     `submission_id` INT NOT NULL,
@@ -167,7 +186,7 @@ CREATE TABLE `peer_reviews` (
     CONSTRAINT `fk_peer_reviews_reviewer` FOREIGN KEY (`reviewer_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 10. Review Scores Table
+-- 11. Review Scores Table
 CREATE TABLE `review_scores` (
     `score_id` INT AUTO_INCREMENT PRIMARY KEY,
     `review_id` INT NOT NULL,
@@ -179,7 +198,7 @@ CREATE TABLE `review_scores` (
     CONSTRAINT `fk_review_scores_rubric` FOREIGN KEY (`rubric_id`) REFERENCES `rubrics` (`rubric_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 11. Forums Table
+-- 12. Forums Table
 CREATE TABLE `forums` (
     `forum_id` INT AUTO_INCREMENT PRIMARY KEY,
     `course_id` INT NOT NULL,
@@ -190,7 +209,7 @@ CREATE TABLE `forums` (
     CONSTRAINT `fk_forums_course` FOREIGN KEY (`course_id`) REFERENCES `courses` (`course_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 12. Forum Posts Table
+-- 13. Forum Posts Table
 CREATE TABLE `forum_posts` (
     `post_id` INT AUTO_INCREMENT PRIMARY KEY,
     `forum_id` INT NOT NULL,

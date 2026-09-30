@@ -1,7 +1,7 @@
 <?php
 require_once '../includes/bootstrap.php';
 
-if(!$auth->isLoggedIn() || !$auth->hasRole('student')) {
+if(!$auth->isLoggedIn()) {
     $auth->redirect('../login.php');
 }
 
@@ -9,29 +9,43 @@ if(!isset($_GET['id'])) {
     $auth->redirect('forums.php');
 }
 
-$forum_id = $_GET['id'];
+$forum_id = intval($_GET['id']);
+$viewer_id = intval($_SESSION['user_id']);
+$viewer_role = $_SESSION['role'] ?? 'student';
 $db = new Database();
 $conn = $db->getConnection();
 
 // Get forum details
-$stmt = $conn->prepare("SELECT f.*, c.title as course_title, c.course_id 
-                       FROM forums f 
-                       JOIN courses c ON f.course_id = c.course_id 
+$stmt = $conn->prepare("SELECT f.*, c.title as course_title, c.course_id, c.instructor_id
+                       FROM forums f
+                       JOIN courses c ON f.course_id = c.course_id
                        WHERE f.forum_id = ?");
 $stmt->execute([$forum_id]);
 $forum = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if(!$forum) {
-    $auth->redirect('forums.php');
+    $auth->redirect(($_SESSION['role'] ?? '') === 'instructor' ? '../instructor/courses.php' : 'forums.php');
 }
 
-// Check if student is enrolled in the course
-$stmt = $conn->prepare("SELECT * FROM enrollments WHERE user_id = ? AND course_id = ? AND enrollment_status = 'approved'");
-$stmt->execute([$_SESSION['user_id'], $forum['course_id']]);
-$enrollment = $stmt->fetch(PDO::FETCH_ASSOC);
+// Access is role-aware. Students need an approved enrollment; the instructor
+// who owns the course is also allowed in. course_manage.php links here with
+// "View Forum", but this page used to require the student role, so every
+// instructor who clicked it was bounced to the login screen.
+$back_url = 'forums.php';
+$can_access = false;
 
-if(!$enrollment) {
-    $auth->redirect('forums.php');
+if($viewer_role === 'instructor') {
+    $can_access = (int)$forum['instructor_id'] === $viewer_id;
+    $back_url = '../instructor/course_manage.php?id=' . (int)$forum['course_id'];
+} else {
+    $stmt = $conn->prepare("SELECT 1 FROM enrollments
+                            WHERE user_id = ? AND course_id = ? AND enrollment_status = 'approved'");
+    $stmt->execute([$viewer_id, $forum['course_id']]);
+    $can_access = (bool)$stmt->fetchColumn();
+}
+
+if(!$can_access) {
+    $auth->redirect($viewer_role === 'instructor' ? '../instructor/courses.php' : 'forums.php');
 }
 
 // Get forum posts with user information and reply counts
@@ -53,7 +67,7 @@ if($_POST && isset($_POST['create_post'])) {
     
     if(!empty($title) && !empty($content)) {
         $stmt = $conn->prepare("INSERT INTO forum_posts (forum_id, user_id, title, content) VALUES (?, ?, ?, ?)");
-        if($stmt->execute([$forum_id, $_SESSION['user_id'], $title, $content])) {
+        if($stmt->execute([$forum_id, $viewer_id, $title, $content])) {
             $success = "Post created successfully!";
             // Refresh the page to show the new post
             header("Location: forum_view.php?id=" . $forum_id);
@@ -71,11 +85,16 @@ require_once '../includes/header.php';
 
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
     <h1 class="h2"><?php echo htmlspecialchars($forum['title']); ?></h1>
-    <?php if(!$forum['is_locked']): ?>
+    <div class="d-flex flex-wrap align-items-center gap-2">
+        <a href="<?php echo e($back_url); ?>" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Back
+        </a>
+        <?php if(!$forum['is_locked']): ?>
         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createPostModal">
             <i class="fas fa-plus"></i> New Post
         </button>
-    <?php endif; ?>
+        <?php endif; ?>
+    </div>
 </div>
 
 <?php if(isset($success)): ?>

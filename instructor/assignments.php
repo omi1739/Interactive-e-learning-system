@@ -40,6 +40,10 @@ if($_POST && isset($_POST['create_assignment'])) {
         $_SESSION['error'] = "Invalid submission format.";
     } elseif($max_file_size < 1 || $max_file_size > 100) {
         $_SESSION['error'] = "Maximum file size must be between 1 and 100 MB.";
+    } elseif(mb_strlen($title) > 200) {
+        $_SESSION['error'] = "Title must be 200 characters or fewer.";
+    } elseif(!valid_extension_list($allowed_file_types)) {
+        $_SESSION['error'] = "Allowed file types must be a comma-separated list of extensions, without dots.";
     } else {
         // The module must belong to one of this instructor's courses, otherwise
         // an assignment could be created inside somebody else's course.
@@ -129,6 +133,26 @@ if($filter_module_id > 0) {
     $stmt->execute([$_SESSION['user_id']]);
 }
 $assignments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Published modules for every one of this instructor's courses, in one query,
+// grouped for the "Create Assignment" module dropdown.
+$modules_by_course = [];
+$course_group_titles = [];
+if(count($courses) > 0) {
+    $course_ids = array_map('intval', array_column($courses, 'course_id'));
+    $placeholders = implode(',', array_fill(0, count($course_ids), '?'));
+    $module_stmt = $conn->prepare("SELECT module_id, course_id, title, module_order
+                                   FROM modules
+                                   WHERE is_published = TRUE AND course_id IN ($placeholders)
+                                   ORDER BY course_id, module_order");
+    $module_stmt->execute($course_ids);
+    foreach($courses as $course) {
+        $course_group_titles[(int)$course['course_id']] = $course['title'];
+    }
+    foreach($module_stmt->fetchAll(PDO::FETCH_ASSOC) as $module) {
+        $modules_by_course[(int)$module['course_id']][] = $module;
+    }
+}
 
 require_once '../includes/header.php';
 ?>
@@ -268,24 +292,22 @@ require_once '../includes/header.php';
                                 <label for="module_id" class="form-label">Module <span class="text-danger">*</span></label>
                                 <select class="form-select" id="module_id" name="module_id" required>
                                     <option value="">Select Module</option>
-                                    <?php foreach($courses as $course): 
-                                        // Get modules for this course
-                                        $module_stmt = $conn->prepare("SELECT * FROM modules WHERE course_id = ? AND is_published = TRUE ORDER BY module_order");
-                                        $module_stmt->execute([$course['course_id']]);
-                                        $modules = $module_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                        
-                                        if(count($modules) > 0): ?>
-                                            <optgroup label="<?php echo htmlspecialchars($course['title']); ?>">
-                                            <?php foreach($modules as $module): ?>
-                                                <?php // Preselect the module the user came from via ?module_id=,
-                                                      // so "Create Assignment" lands on the right module. ?>
+                                    <?php // One query for every module instead of one per
+                                          // course. Constrained to this instructor's
+                                          // own courses, so the dropdown cannot offer a
+                                          // module the POST handler would reject. ?>
+                                    <?php foreach($modules_by_course as $course_id => $module_group): ?>
+                                        <optgroup label="<?php echo e($course_group_titles[$course_id] ?? ''); ?>">
+                                            <?php foreach($module_group as $module): ?>
+                                                <?php // Preselect the module the user came from via
+                                                      // ?module_id=, so "Create Assignment" lands
+                                                      // on the right module. ?>
                                                 <option value="<?php echo (int)$module['module_id']; ?>" <?php echo $filter_module_id === (int)$module['module_id'] ? 'selected' : ''; ?>>
                                                     <?php echo e($module['title']); ?>
                                                 </option>
                                             <?php endforeach; ?>
-                                            </optgroup>
-                                        <?php endif;
-                                    endforeach; ?>
+                                        </optgroup>
+                                    <?php endforeach; ?>
                                 </select>
                             </div>
                         </div>

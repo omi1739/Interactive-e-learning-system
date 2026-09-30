@@ -19,8 +19,14 @@ $my_course_ids = array_map('intval', array_column($courses, 'course_id'));
 $selected_course = intval($_GET['course_id'] ?? 0);
 $course_students = [];
 
+// Drain the session error into the local $error the page already renders.
+// These four messages were written to $_SESSION['error'] and never read back,
+// so an access denial or invalid status produced no visible feedback at all.
+$error = $_SESSION['error'] ?? '';
+unset($_SESSION['error']);
+
 if($selected_course && !in_array($selected_course, $my_course_ids, true)) {
-    $_SESSION['error'] = "You do not have access to that course.";
+    $error = "You do not have access to that course.";
     $selected_course = 0;
 }
 
@@ -38,15 +44,17 @@ if($_POST && isset($_POST['update_status'])) {
     $allowed_statuses = ['pending', 'approved', 'rejected', 'completed'];
 
     if(!in_array($course_id, $my_course_ids, true)) {
-        $_SESSION['error'] = "You can only manage students in your own courses.";
+        $error = "You can only manage students in your own courses.";
     } elseif(!in_array($status, $allowed_statuses, true)) {
-        $_SESSION['error'] = "Invalid enrollment status.";
+        $error = "Invalid enrollment status.";
     } elseif($user_id <= 0) {
-        $_SESSION['error'] = "Invalid student.";
+        $error = "Invalid student.";
     } else {
         if($functions->updateEnrollmentStatus($user_id, $course_id, $status)) {
             $success = "Enrollment status updated successfully!";
-            // Refresh students list
+            // Refresh the roster. Use the course that was actually updated,
+            // not the GET value, so the page always shows the rows it changed.
+            $selected_course = $course_id;
             $course_students = $functions->getCourseStudents($selected_course);
         } else {
             $error = "Failed to update enrollment status.";
@@ -82,8 +90,8 @@ require_once '../includes/header.php';
                             Select a Course
                         </a>
                         <?php foreach($courses as $course): ?>
-                        <a href="students.php?course_id=<?php echo $course['course_id']; ?>" 
-                           class="list-group-item list-group-item-action <?php echo $selected_course == $course['course_id'] ? 'active' : ''; ?>">
+                        <a href="students.php?course_id=<?php echo (int)$course['course_id']; ?>" 
+                           class="list-group-item list-group-item-action <?php echo $selected_course === (int)$course['course_id'] ? 'active' : ''; ?>">
                             <?php echo e($course['title']); ?>
                             <small class="d-block text-muted"><?php echo e($course['course_code']); ?></small>
                         </a>
@@ -150,20 +158,33 @@ require_once '../includes/header.php';
                                             </span>
                                         </td>
                                         <td>
-                                            <?php echo $student['grade'] !== null ? $student['grade'] : '-'; ?>
+                                            <?php if($student['grade'] !== null && $student['grade'] !== ''): ?>
+                                                <?php echo e(ui_num($student['grade'], 2)); ?>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
+                                            <?php endif; ?>
                                         </td>
                                         <td>
-                                            <form method="POST" class="d-inline">
+                                            <?php // Progress was previously unreachable: student_progress.php
+                                                  // existed but nothing linked to it. ?>
+                                            <a href="student_progress.php?course_id=<?php echo (int)$selected_course; ?>&amp;student_id=<?php echo (int)$student['user_id']; ?>"
+                                               class="btn btn-outline-primary btn-sm mb-2">
+                                                <i class="fas fa-chart-line"></i> Progress
+                                            </a>
+                                            <form method="POST" class="d-block" data-auto-submit>
                                                 <?php echo csrf_field(); ?>
-                                                <input type="hidden" name="user_id" value="<?php echo $student['user_id']; ?>">
-                                                <input type="hidden" name="course_id" value="<?php echo $selected_course; ?>">
-                                                <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+                                                <input type="hidden" name="user_id" value="<?php echo (int)$student['user_id']; ?>">
+                                                <input type="hidden" name="course_id" value="<?php echo (int)$selected_course; ?>">
+                                                <label class="visually-hidden" for="status<?php echo (int)$student['user_id']; ?>">
+                                                    Enrollment status for <?php echo e($student['first_name'] . ' ' . $student['last_name']); ?>
+                                                </label>
+                                                <select name="status" id="status<?php echo (int)$student['user_id']; ?>" class="form-select form-select-sm" data-auto-submit>
                                                     <option value="pending" <?php echo $student['enrollment_status'] == 'pending' ? 'selected' : ''; ?>>Pending</option>
                                                     <option value="approved" <?php echo $student['enrollment_status'] == 'approved' ? 'selected' : ''; ?>>Approved</option>
                                                     <option value="rejected" <?php echo $student['enrollment_status'] == 'rejected' ? 'selected' : ''; ?>>Rejected</option>
                                                     <option value="completed" <?php echo $student['enrollment_status'] == 'completed' ? 'selected' : ''; ?>>Completed</option>
                                                 </select>
-                                                <?php // A programmatic this.form.submit() does not send a
+                                                <?php // A programmatic form.submit() does not send a
                                                       // submit button's name, so flag the action here. ?>
                                                 <input type="hidden" name="update_status" value="1">
                                             </form>

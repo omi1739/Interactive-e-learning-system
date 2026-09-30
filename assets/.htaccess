@@ -1,0 +1,38 @@
+# Static assets only. Nothing in this directory may ever be executed.
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php8.c>
+    php_flag engine off
+</IfModule>
+
+# Refuse to serve anything that is not a plain asset.
+<FilesMatch "\.(?i:php|phar|phtml|php[0-9]|cgi|pl|py|sh|exe|htaccess)$">
+    Require all denied
+</FilesMatch>
+
+# No directory listings.
+Options -Indexes
+
+# Long-lived caching; app.css/app.js are versioned by the query string that
+# header.php appends (v=<filemtime>), so a change is picked up immediately.
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css                  "access plus 1 year"
+    ExpiresByType application/javascript    "access plus 1 year"
+    ExpiresByType image/svg+xml             "access plus 1 year"
+    ExpiresByType image/webp                "access plus 1 year"
+    ExpiresByType font/woff2                "access plus 1 year"
+</IfModule>
+
+<IfModule mod_headers.c>
+    # Remove the version banner that some hosts append.
+    Header unset X-Powered-By
+
+    # Assets are same-origin and never need embedding elsewhere.
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

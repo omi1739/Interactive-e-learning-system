@@ -1,326 +1,265 @@
 <?php
+/**
+ * Application shell: <head>, topbar, sidebar and the opening of <main>.
+ *
+ * Every authenticated page includes this at the top and includes/footer.php
+ * at the bottom. Both are layout-only: no page should print a <div> or
+ * <section> that this file does not close, because the closing tags live in
+ * footer.php.
+ */
+
 if (!defined('BOOTSTRAP_LOADED')) {
     require_once __DIR__ . '/bootstrap.php';
 }
 
 $current_page = basename($_SERVER['PHP_SELF']);
-$current_dir = basename(dirname($_SERVER['PHP_SELF']));
-$app_root = defined('APP_ROOT') ? APP_ROOT : '';
+$current_dir  = basename(dirname($_SERVER['PHP_SELF']));
+$app_root     = defined('APP_ROOT') ? APP_ROOT : '';
 
-// Helper function to check active nav state
-function is_nav_active($page, $dir = null) {
-    global $current_page, $current_dir;
-    if ($dir !== null && $current_dir !== $dir) {
-        return '';
+// basename(dirname()) yields the physical folder name, which is only a useful
+// role segment when the app runs in a subdirectory. Derive the path relative
+// to the app root instead so the current section is always '', 'student' or
+// 'instructor' regardless of where the project is deployed.
+$script_path = str_replace('\\', '/', $_SERVER['PHP_SELF']);
+if ($app_root !== '' && strpos($script_path, $app_root) === 0) {
+    $script_path = substr($script_path, strlen($app_root));
+}
+$script_path = ltrim($script_path, '/');
+$current_page = basename($script_path);
+$current_dir  = strpos($script_path, '/') !== false
+    ? substr($script_path, 0, strpos($script_path, '/'))
+    : '';
+
+$current_user = $auth->isLoggedIn() ? $_SESSION : [];
+$current_role = $current_user['role'] ?? null;
+
+/**
+ * The navigation tree for a role.
+ *
+ * Each item lists the sibling pages that should also light it up, so a detail
+ * page such as course_view.php still highlights "My Courses" instead of
+ * leaving the sidebar with nothing selected.
+ */
+function app_nav_items($role) {
+    if ($role === 'instructor') {
+        return [
+            [
+                'label' => 'Dashboard',
+                'icon'  => 'fa-chart-line',
+                'url'   => 'instructor/dashboard.php',
+                'match' => ['dashboard'],
+            ],
+            [
+                'label' => 'My Courses',
+                'icon'  => 'fa-chalkboard-user',
+                'url'   => 'instructor/courses.php',
+                'match' => ['courses', 'course_manage', 'course_edit'],
+            ],
+            [
+                'label' => 'Assignments',
+                'icon'  => 'fa-clipboard-check',
+                'url'   => 'instructor/assignments.php',
+                'match' => ['assignments', 'assignment_view', 'assignment_submissions', 'rubrics', 'submission_view'],
+            ],
+            [
+                'label' => 'Students',
+                'icon'  => 'fa-user-group',
+                'url'   => 'instructor/students.php',
+                'match' => ['students', 'student_progress'],
+            ],
+        ];
     }
-    return ($current_page === $page) ? 'active' : '';
+
+    return [
+        [
+            'label' => 'Dashboard',
+            'icon'  => 'fa-chart-pie',
+            'url'   => 'student/dashboard.php',
+            'match' => ['dashboard'],
+        ],
+        [
+            'label' => 'My Courses',
+            'icon'  => 'fa-book-reader',
+            'url'   => 'student/courses.php',
+            'match' => ['courses', 'course_view'],
+        ],
+        [
+            'label' => 'Assignments',
+            'icon'  => 'fa-list-check',
+            'url'   => 'student/assignments.php',
+            'match' => ['assignments', 'assignment_view', 'submission_preview'],
+        ],
+        [
+            'label' => 'Peer Reviews',
+            'icon'  => 'fa-user-check',
+            'url'   => 'student/peer_reviews.php',
+            'match' => ['peer_reviews', 'review_view', 'review_complete'],
+        ],
+        [
+            'label' => 'Forums',
+            'icon'  => 'fa-comments',
+            'url'   => 'student/forums.php',
+            'match' => ['forums', 'forum_view', 'post_view'],
+        ],
+    ];
+}
+
+/**
+ * True when $item should be rendered as the current page.
+ */
+function app_nav_is_active(array $item, $current_dir, $current_page) {
+    // Student pages live in student/, instructor pages in instructor/, and the
+    // two dashboards share a filename. The directory disambiguates them.
+    $item_dir = strpos($item['url'], 'instructor/') === 0 ? 'instructor' : 'student';
+    if ($item_dir !== $current_dir) {
+        return false;
+    }
+    return in_array($current_page, $item['match'], true);
 }
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive e-Learning & Peer Review</title>
-    <!-- Google Fonts -->
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff">
+    <title><?php echo e($page_title ?? 'Dashboard'); ?> &middot; e-Learning System</title>
+
+    <!-- Set the theme before first paint so a dark-mode visitor never sees a
+         white flash. Kept inline and tiny on purpose. -->
+    <script>
+        (function () {
+            try {
+                var stored = localStorage.getItem('ils-theme');
+                var dark = stored
+                    ? stored === 'dark'
+                    : window.matchMedia('(prefers-color-scheme: dark)').matches;
+                document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+            } catch (e) { /* default to light */ }
+        })();
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Bootstrap 5 CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- FontAwesome Icons -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    
-    <style>
-        :root {
-            --brand-primary: #4f46e5;
-            --brand-primary-hover: #4338ca;
-            --brand-secondary: #06b6d4;
-            --brand-dark: #0f172a;
-            --sidebar-bg: #ffffff;
-            --sidebar-border: #e2e8f0;
-            --body-bg: #f8fafc;
-            --card-border: #e2e8f0;
-            --text-main: #1e293b;
-        }
+    <link rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-4164ca6728e93c48c84afe5669153d385791a6893a61cb676260ebe69365c93d9b4635e1d093218d8ea15be00b130207"
+          crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+          integrity="sha384-3cf21910660cd6ff33a793f2ed48c56fbf52e7c51ea822fda5856754f511284aaf8a83d139a54024a28bcef1f6ac39c8"
+          crossorigin="anonymous" referrerpolicy="no-referrer">
 
-        body {
-            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-            background-color: var(--body-bg);
-            color: var(--text-main);
-            min-height: 100vh;
-        }
-
-        /* Top Navbar */
-        .main-navbar {
-            background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-            padding: 0.75rem 1rem;
-        }
-        .navbar-brand {
-            font-weight: 700;
-            letter-spacing: -0.02em;
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-        }
-
-        /* Sidebar Navigation */
-        .sidebar {
-            min-height: calc(100vh - 60px);
-            background-color: var(--sidebar-bg);
-            border-right: 1px solid var(--sidebar-border);
-            padding: 1.25rem 0.75rem;
-        }
-        .sidebar .nav-link {
-            color: #64748b;
-            font-weight: 500;
-            font-size: 0.9rem;
-            padding: 0.65rem 0.9rem;
-            border-radius: 8px;
-            margin-bottom: 0.25rem;
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            transition: all 0.15s ease-in-out;
-        }
-        .sidebar .nav-link i {
-            width: 20px;
-            text-align: center;
-            font-size: 1rem;
-            color: #94a3b8;
-            transition: color 0.15s ease-in-out;
-        }
-        .sidebar .nav-link:hover {
-            color: var(--brand-primary);
-            background-color: #f1f5f9;
-        }
-        .sidebar .nav-link:hover i {
-            color: var(--brand-primary);
-        }
-        .sidebar .nav-link.active {
-            color: #ffffff !important;
-            background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%) !important;
-            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
-        }
-        .sidebar .nav-link.active i {
-            color: #ffffff !important;
-        }
-
-        /* Cards & Content */
-        .card {
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.03);
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-        }
-        .course-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08);
-        }
-        .badge {
-            font-weight: 600;
-            letter-spacing: 0.02em;
-        }
-
-        /* Dark Mode Styles */
-        body.dark-mode {
-            --body-bg: #090d16;
-            --text-main: #f1f5f9;
-            --sidebar-bg: #0f172a;
-            --sidebar-border: #1e293b;
-            --card-border: #1e293b;
-            background-color: var(--body-bg);
-            color: var(--text-main);
-        }
-        body.dark-mode .card {
-            background-color: #111827;
-            border-color: #1f2937;
-            color: #f3f4f6;
-        }
-        body.dark-mode .card-header {
-            background-color: #111827 !important;
-            border-color: #1f2937 !important;
-            color: #f3f4f6 !important;
-        }
-        body.dark-mode .table {
-            color: #f1f5f9;
-            border-color: #1e293b;
-        }
-        body.dark-mode .table-light {
-            background-color: #1e293b !important;
-            color: #f1f5f9 !important;
-        }
-        body.dark-mode .border-bottom,
-        body.dark-mode .border-top,
-        body.dark-mode .border {
-            border-color: #1e293b !important;
-        }
-        body.dark-mode .bg-light {
-            background-color: #1e293b !important;
-            color: #f1f5f9 !important;
-        }
-        body.dark-mode .text-dark {
-            color: #f1f5f9 !important;
-        }
-    </style>
+    <!-- Loaded last so every rule here can override Bootstrap. -->
+    <link rel="stylesheet" href="<?php echo e_attr(asset_url('css/app.css')); ?>">
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
 
-    <!-- Main Navigation Bar -->
-    <nav class="navbar navbar-expand-lg navbar-dark main-navbar sticky-top">
-        <div class="container-fluid px-3">
-            <a class="navbar-brand text-white" href="<?php echo htmlspecialchars($app_root . '/dashboard.php'); ?>">
-                <span class="p-2 rounded-3 bg-white text-primary d-inline-flex align-items-center justify-content-center" style="width: 34px; height: 34px;">
-                    <i class="fas fa-graduation-cap"></i>
+<header class="app-topbar">
+    <button type="button" class="icon-btn d-lg-none" data-sidebar-toggle
+            aria-controls="appSidebar" aria-label="Open navigation menu">
+        <i class="fas fa-bars" aria-hidden="true"></i>
+    </button>
+
+    <a class="app-brand" href="<?php echo e_attr(app_url('dashboard.php')); ?>">
+        <span class="app-brand__mark"><i class="fas fa-graduation-cap" aria-hidden="true"></i></span>
+        <span class="app-brand__text">
+            e-Learning
+            <small>Peer Review Platform</small>
+        </span>
+    </a>
+
+    <span class="topbar-spacer"></span>
+
+    <button type="button" class="icon-btn" data-theme-toggle aria-label="Switch to dark mode" aria-pressed="false">
+        <i class="fas fa-moon" aria-hidden="true"></i>
+    </button>
+
+    <?php if (!empty($current_user['user_id'])): ?>
+        <div class="dropdown">
+            <button class="user-chip dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                    aria-expanded="false" id="userMenu">
+                <?php echo ui_avatar($current_user['first_name'] ?? '', $current_user['last_name'] ?? '', 'sm'); ?>
+                <span class="user-chip__meta">
+                    <span class="user-chip__name"><?php echo e(trim(($current_user['first_name'] ?? '') . ' ' . ($current_user['last_name'] ?? ''))); ?></span>
+                    <span class="role"><?php echo e(ucfirst((string) $current_role)); ?></span>
                 </span>
-                <span>e-Learning System</span>
-            </a>
-
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarContent">
-                <span class="navbar-toggler-icon"></span>
             </button>
-
-            <div class="collapse navbar-collapse" id="navbarContent">
-                <ul class="navbar-nav ms-auto align-items-center gap-2">
-                    <li class="nav-item">
-                        <button class="btn btn-sm btn-outline-light px-3 py-1" id="darkModeToggle">
-                            <i class="fas fa-moon me-1"></i> Dark Mode
-                        </button>
-                    </li>
-
-                    <?php if(isset($_SESSION['user_id'])): ?>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle text-white d-flex align-items-center gap-2" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
-                            <span class="badge bg-primary rounded-pill px-2 py-1">
-                                <?php echo ucfirst($_SESSION['role']); ?>
-                            </span>
-                            <span class="fw-semibold">
-                                <?php echo htmlspecialchars($_SESSION['first_name'] . ' ' . $_SESSION['last_name']); ?>
-                            </span>
-                        </a>
-                        <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0">
-                            <li>
-                                <a class="dropdown-item" href="<?php echo htmlspecialchars($app_root . '/profile.php'); ?>">
-                                    <i class="fas fa-user-circle me-2 text-muted"></i> My Profile
-                                </a>
-                            </li>
-                            <li><hr class="dropdown-divider"></li>
-                            <li>
-                                <a class="dropdown-item text-danger" href="<?php echo htmlspecialchars($app_root . '/logout.php'); ?>">
-                                    <i class="fas fa-sign-out-alt me-2"></i> Log Out
-                                </a>
-                            </li>
-                        </ul>
-                    </li>
-                    <?php else: ?>
-                    <li class="nav-item">
-                        <a class="btn btn-sm btn-light px-3" href="<?php echo htmlspecialchars($app_root . '/login.php'); ?>">
-                            <i class="fas fa-sign-in-alt me-1"></i> Sign In
-                        </a>
-                    </li>
-                    <?php endif; ?>
-                </ul>
-            </div>
+            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenu">
+                <li class="px-2 py-1">
+                    <div class="fw-semibold text-strong" style="font-size:.8125rem"><?php echo e($current_user['email'] ?? ''); ?></div>
+                    <div class="text-subtle" style="font-size:.6875rem">@<?php echo e($current_user['username'] ?? ''); ?></div>
+                </li>
+                <li><hr class="dropdown-divider"></li>
+                <li>
+                    <a class="dropdown-item" href="<?php echo e_attr(app_url('profile.php')); ?>">
+                        <i class="fas fa-user" aria-hidden="true"></i> My profile
+                    </a>
+                </li>
+                <li>
+                    <a class="dropdown-item" href="<?php echo e_attr(app_url('dashboard.php')); ?>">
+                        <i class="fas fa-gauge-high" aria-hidden="true"></i> Dashboard
+                    </a>
+                </li>
+                <li><hr class="dropdown-divider"></li>
+                <li>
+                    <a class="dropdown-item text-danger" href="<?php echo e_attr(app_url('logout.php')); ?>">
+                        <i class="fas fa-right-from-bracket" aria-hidden="true"></i> Sign out
+                    </a>
+                </li>
+            </ul>
         </div>
-    </nav>
+    <?php else: ?>
+        <a class="btn btn-primary btn-sm" href="<?php echo e_attr(app_url('login.php')); ?>">Sign in</a>
+    <?php endif; ?>
+</header>
 
-    <div class="container-fluid">
-        <div class="row">
-            <?php if(isset($_SESSION['user_id'])): ?>
-            <!-- Sidebar Navigation -->
-            <nav class="col-md-3 col-lg-2 d-md-block sidebar">
-                <div class="position-sticky">
-                    <ul class="nav flex-column">
+<div class="app-layout">
+    <button type="button" class="sidebar-backdrop" id="sidebarBackdrop" tabindex="-1" aria-hidden="true"></button>
 
-                        <?php if($_SESSION['role'] === 'student'): ?>
-                            <!-- Student Links -->
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('dashboard.php', 'student'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/student/dashboard.php'); ?>">
-                                    <i class="fas fa-chart-pie"></i>
-                                    <span>Dashboard</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('courses.php', 'student'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/student/courses.php'); ?>">
-                                    <i class="fas fa-book-reader"></i>
-                                    <span>My Courses & Catalog</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('assignments.php', 'student'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/student/assignments.php'); ?>">
-                                    <i class="fas fa-tasks"></i>
-                                    <span>My Assignments</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('peer_reviews.php', 'student'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/student/peer_reviews.php'); ?>">
-                                    <i class="fas fa-user-check"></i>
-                                    <span>Peer Reviews</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('forums.php', 'student'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/student/forums.php'); ?>">
-                                    <i class="fas fa-comments"></i>
-                                    <span>Discussion Forums</span>
-                                </a>
-                            </li>
+    <?php if (!empty($current_user['user_id']) && $current_role): ?>
+        <aside class="app-sidebar offcanvas offcanvas-start" tabindex="-1" id="appSidebar"
+               aria-labelledby="sidebarLabel">
+            <div class="offcanvas-header px-3">
+                <h2 class="offcanvas-title h6 mb-0" id="sidebarLabel">Navigation</h2>
+                <button type="button" class="btn-close sidebar-close" data-sidebar-close aria-label="Close menu"></button>
+            </div>
 
-                        <?php elseif($_SESSION['role'] === 'instructor'): ?>
-                            <!-- Instructor Links -->
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('dashboard.php', 'instructor'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/instructor/dashboard.php'); ?>">
-                                    <i class="fas fa-chart-line"></i>
-                                    <span>Dashboard</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('courses.php', 'instructor') || is_nav_active('course_manage.php', 'instructor') || is_nav_active('course_edit.php', 'instructor'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/instructor/courses.php'); ?>">
-                                    <i class="fas fa-chalkboard"></i>
-                                    <span>My Courses</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('assignments.php', 'instructor') || is_nav_active('assignment_view.php', 'instructor') || is_nav_active('assignment_submissions.php', 'instructor'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/instructor/assignments.php'); ?>">
-                                    <i class="fas fa-clipboard-list"></i>
-                                    <span>Assignments & Reviews</span>
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?php echo is_nav_active('students.php', 'instructor') || is_nav_active('student_progress.php', 'instructor'); ?>" 
-                                   href="<?php echo htmlspecialchars($app_root . '/instructor/students.php'); ?>">
-                                    <i class="fas fa-user-graduate"></i>
-                                    <span>Student Roster</span>
-                                </a>
-                            </li>
+            <nav class="sidebar-nav" aria-label="Main">
+                <div class="sidebar-section"><?php echo e($current_role === 'instructor' ? 'Teaching' : 'Learning'); ?></div>
 
-                        <?php endif; ?>
+                <?php foreach (app_nav_items($current_role) as $item): ?>
+                    <a class="sidebar-link<?php echo app_nav_is_active($item, $current_dir, $current_page) ? ' is-active' : ''; ?>"
+                       href="<?php echo e_attr(app_url($item['url'])); ?>"
+                       <?php echo app_nav_is_active($item, $current_dir, $current_page) ? ' aria-current="page"' : ''; ?>>
+                        <i class="fas <?php echo e_attr($item['icon']); ?>" aria-hidden="true"></i>
+                        <span><?php echo e($item['label']); ?></span>
+                    </a>
+                <?php endforeach; ?>
 
-                        <li class="nav-item mt-3 pt-3 border-top">
-                            <a class="nav-link <?php echo is_nav_active('profile.php'); ?>" 
-                               href="<?php echo htmlspecialchars($app_root . '/profile.php'); ?>">
-                                <i class="fas fa-id-card"></i>
-                                <span>My Profile</span>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link text-danger" href="<?php echo htmlspecialchars($app_root . '/logout.php'); ?>">
-                                <i class="fas fa-power-off text-danger"></i>
-                                <span>Sign Out</span>
-                            </a>
-                        </li>
-                    </ul>
-                </div>
+                <div class="sidebar-section">Account</div>
+                <a class="sidebar-link<?php echo ($current_dir === '' && $current_page === 'profile.php') ? ' is-active' : ''; ?>"
+                   href="<?php echo e_attr(app_url('profile.php')); ?>">
+                    <i class="fas fa-id-card" aria-hidden="true"></i>
+                    <span>My profile</span>
+                </a>
+                <a class="sidebar-link is-danger" href="<?php echo e_attr(app_url('logout.php')); ?>">
+                    <i class="fas fa-power-off" aria-hidden="true"></i>
+                    <span>Sign out</span>
+                </a>
             </nav>
-            <?php endif; ?>
-            
-            <!-- Main Content Area -->
-            <main class="<?php echo isset($_SESSION['user_id']) ? 'col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4' : 'col-12 py-4'; ?>">
+
+            <div class="sidebar-footer">
+                <?php if ($current_role === 'instructor'): ?>
+                    <i class="fas fa-chalkboard-user me-1" aria-hidden="true"></i> Instructor workspace
+                <?php else: ?>
+                    <i class="fas fa-user-graduate me-1" aria-hidden="true"></i> Student workspace
+                <?php endif; ?>
+            </div>
+        </aside>
+    <?php endif; ?>
+
+    <main class="app-content" id="main-content" tabindex="-1">
+        <?php flash_render(); ?>

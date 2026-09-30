@@ -11,18 +11,21 @@ $conn = $db->getConnection();
 // Get review details.
 // pr.reviewer_id = ? scopes this to the signed-in reviewer, so one student
 // cannot open another student's review by guessing the id.
-$stmt = $conn->prepare("SELECT pr.*, 
+//
+// The author's NAME is intentionally not selected. s.student_id is still
+// needed, to stop a student reviewing their own work, but joining users here
+// and printing the name is what leaked the identity to reviewers. Blind review
+// only works if the reviewer never sees whose submission this is.
+$stmt = $conn->prepare("SELECT pr.*,
                                s.submission_id, s.submission_text, s.file_path, s.file_name, s.submission_date,
                                s.student_id as author_id,
                                a.title as assignment_title, a.assignment_id, a.max_points, a.description as assignment_description,
-                               u.first_name, u.last_name, u.username,
                                c.title as course_title, c.course_id
                         FROM peer_reviews pr
                         JOIN submissions s ON pr.submission_id = s.submission_id
                         JOIN assignments a ON s.assignment_id = a.assignment_id
                         JOIN modules m ON a.module_id = m.module_id
                         JOIN courses c ON m.course_id = c.course_id
-                        JOIN users u ON s.student_id = u.user_id
                         WHERE pr.review_id = ? AND pr.reviewer_id = ?");
 $stmt->execute([$review_id, $_SESSION['user_id']]);
 $review = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -33,16 +36,17 @@ if(!$review) {
 
 // A student must never review their own work.
 if((int)$review['author_id'] === (int)$_SESSION['user_id']) {
-    $_SESSION['error'] = "You cannot review your own submission.";
-    header("Location: peer_reviews.php");
-    exit();
+    // flash_error() because we redirect to peer_reviews.php, which renders
+    // session flashes but never read the legacy $_SESSION['error'] key - so
+    // the "you cannot review yourself" warning was silently dropped.
+    flash_error("You cannot review your own submission.");
+    $auth->redirect('peer_reviews.php');
 }
 
 // Check if review is already completed
 if($review['status'] == 'completed') {
-    $_SESSION['error'] = "This review has already been completed.";
-    header("Location: peer_reviews.php");
-    exit();
+    flash_error("This review has already been completed.");
+    $auth->redirect('peer_reviews.php');
 }
 
 // Get rubrics for this assignment
@@ -104,9 +108,12 @@ if($_POST && isset($_POST['submit_review'])) {
             
             $conn->commit();
             
-            $_SESSION['success'] = "Review submitted successfully! Overall score: " . number_format($percentage_score, 1) . "%";
-            header("Location: peer_reviews.php");
-            exit();
+            // This confirmation used to be written to $_SESSION['success'] and
+            // then redirected, so the student never saw that their review
+            // actually went through.
+            flash_success("Review submitted successfully! Overall score: "
+                . ui_num($percentage_score, 1) . "%");
+            $auth->redirect('peer_reviews.php');
             
         } catch (Exception $e) {
             $conn->rollBack();
@@ -148,7 +155,7 @@ require_once '../includes/header.php';
                     <div class="col-md-6">
                         <h6><?php echo htmlspecialchars($review['assignment_title']); ?></h6>
                         <p class="mb-1"><strong>Course:</strong> <?php echo htmlspecialchars($review['course_title']); ?></p>
-                        <p class="mb-1"><strong>Student:</strong> <?php echo htmlspecialchars($review['first_name'] . ' ' . $review['last_name']); ?></p>
+                        <p class="mb-1"><strong>Student:</strong> <span class="text-primary"><i class="fas fa-user-secret me-1" aria-hidden="true"></i>Anonymous classmate</span></p>
                         <p class="mb-0"><strong>Submitted:</strong> <?php echo date('M j, Y g:i A', strtotime($review['submission_date'])); ?></p>
                     </div>
                     <div class="col-md-6">
@@ -336,7 +343,7 @@ require_once '../includes/header.php';
             <div class="card-body">
                 <p><strong>Assignment:</strong> <?php echo htmlspecialchars($review['assignment_title']); ?></p>
                 <p><strong>Course:</strong> <?php echo htmlspecialchars($review['course_title']); ?></p>
-                <p><strong>Student Being Reviewed:</strong> <?php echo htmlspecialchars($review['first_name'] . ' ' . $review['last_name']); ?></p>
+                <p><strong>Student Being Reviewed:</strong> <span class="text-primary"><i class="fas fa-user-secret me-1" aria-hidden="true"></i>Anonymous classmate</span></p>
                 <p><strong>Review Assigned:</strong> <?php echo date('M j, Y', strtotime($review['review_date'])); ?></p>
                 <p><strong>Status:</strong> <span class="badge bg-warning">In Progress</span></p>
                 

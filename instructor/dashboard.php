@@ -10,34 +10,99 @@ $conn = $db->getConnection();
 // Get instructor statistics
 $courses = $functions->getCourses($_SESSION['user_id']);
 $total_courses = count($courses);
+$instructor_id = (int) $_SESSION['user_id'];
 
-// Calculate statistics
+// Per-course totals in three grouped queries instead of three queries per
+// course. The pending-submission count used to be fetched twice per course
+// (once for the dashboard total, once for "courses needing attention"), and
+// getCourseStudents() pulled a full user row per enrollment only to be
+// count()ed.
+$per_course = [];
+
+// Students per course. Matches getCourseStudents(), which counts every
+// enrollment regardless of status.
+$stmt = $conn->prepare("SELECT e.course_id, COUNT(*) AS student_count
+                       FROM enrollments e
+                       JOIN courses c ON c.course_id = e.course_id
+                       WHERE c.instructor_id = ?
+                       GROUP BY e.course_id");
+$stmt->execute([$instructor_id]);
+$student_counts = [];
+foreach($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $student_counts[(int)$row['course_id']] = (int)$row['student_count'];
+}
+
+$stmt = $conn->prepare("SELECT m.course_id, COUNT(*) AS assignment_count
+                       FROM assignments a
+                       JOIN modules m ON a.module_id = m.module_id
+                       JOIN courses c ON c.course_id = m.course_id
+                       WHERE c.instructor_id = ?
+                       GROUP BY m.course_id");
+$stmt->execute([$instructor_id]);
+$assignment_counts = [];
+foreach($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $assignment_counts[(int)$row['course_id']] = (int)$row['assignment_count'];
+}
+
+$stmt = $conn->prepare("SELECT m.course_id, COUNT(*) AS pending_count
+                       FROM submissions s
+                       JOIN assignments a ON s.assignment_id = a.assignment_id
+                       JOIN modules m ON a.module_id = m.module_id
+                       JOIN courses c ON c.course_id = m.course_id
+                       WHERE c.instructor_id = ? AND s.status = 'submitted'
+                       GROUP BY m.course_id");
+$stmt->execute([$instructor_id]);
+$pending_counts = [];
+foreach($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $pending_counts[(int)$row['course_id']] = (int)$row['pending_count'];
+}
+
+// assignment_submissions.php is keyed by assignment, so "Grade Submissions"
+// needs a concrete assignment_id. Resolve the assignment with the most
+// ungraded submissions in each course instead of sending ?course=, which that
+// page does not accept and which bounced back to assignments.php.
+$stmt = $conn->prepare("SELECT m.course_id, s.assignment_id, COUNT(*) AS pending_count
+                       FROM submissions s
+                       JOIN assignments a ON s.assignment_id = a.assignment_id
+                       JOIN modules m ON a.module_id = m.module_id
+                       JOIN courses c ON c.course_id = m.course_id
+                       WHERE c.instructor_id = ? AND s.status = 'submitted'
+                       GROUP BY m.course_id, s.assignment_id
+                       ORDER BY m.course_id, pending_count DESC, s.assignment_id");
+$stmt->execute([$instructor_id]);
+$top_pending_assignment = [];
+foreach($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+    $cid = (int)$row['course_id'];
+    if(!isset($top_pending_assignment[$cid])) {
+        $top_pending_assignment[$cid] = (int)$row['assignment_id'];
+    }
+}
+
 $total_students = 0;
 $total_assignments = 0;
 $pending_submissions = 0;
+$courses_needing_attention = [];
 
 foreach($courses as $course) {
-    $students = $functions->getCourseStudents($course['course_id']);
-    $total_students += count($students);
-    
-    // Get assignments count
-    $stmt = $conn->prepare("SELECT COUNT(*) as assignment_count 
-                           FROM assignments a 
-                           JOIN modules m ON a.module_id = m.module_id 
-                           WHERE m.course_id = ?");
-    $stmt->execute([$course['course_id']]);
-    $assignment_count = $stmt->fetch(PDO::FETCH_ASSOC)['assignment_count'];
-    $total_assignments += $assignment_count;
-    
-    // Get pending submissions
-    $stmt = $conn->prepare("SELECT COUNT(*) as pending_count 
-                           FROM submissions s 
-                           JOIN assignments a ON s.assignment_id = a.assignment_id 
-                           JOIN modules m ON a.module_id = m.module_id 
-                           WHERE m.course_id = ? AND s.status = 'submitted'");
-    $stmt->execute([$course['course_id']]);
-    $pending_count = $stmt->fetch(PDO::FETCH_ASSOC)['pending_count'];
-    $pending_submissions += $pending_count;
+    $cid = (int)$course['course_id'];
+
+    $total_students += $student_counts[$cid] ?? 0;
+    $total_assignments += $assignment_counts[$cid] ?? 0;
+    $pending_submissions += $pending_counts[$cid] ?? 0;
+
+    $per_course[$cid] = [
+        'students' => $student_counts[$cid] ?? 0,
+        'assignments' => $assignment_counts[$cid] ?? 0,
+        'pending_submissions' => $pending_counts[$cid] ?? 0,
+    ];
+
+    if(($pending_counts[$cid] ?? 0) > 0) {
+        $courses_needing_attention[] = [
+            'course' => $course,
+            'pending_submissions' => $pending_counts[$cid],
+            'assignment_id' => $top_pending_assignment[$cid] ?? 0
+        ];
+    }
 }
 
 // Get recent enrollments
@@ -48,27 +113,8 @@ $stmt = $conn->prepare("SELECT e.*, u.first_name, u.last_name, c.title as course
                        WHERE c.instructor_id = ? 
                        ORDER BY e.enrolled_at DESC 
                        LIMIT 5");
-$stmt->execute([$_SESSION['user_id']]);
+$stmt->execute([$instructor_id]);
 $recent_enrollments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Get courses needing attention
-$courses_needing_attention = [];
-foreach($courses as $course) {
-    $stmt = $conn->prepare("SELECT COUNT(*) as pending_count 
-                           FROM submissions s 
-                           JOIN assignments a ON s.assignment_id = a.assignment_id 
-                           JOIN modules m ON a.module_id = m.module_id 
-                           WHERE m.course_id = ? AND s.status = 'submitted'");
-    $stmt->execute([$course['course_id']]);
-    $pending_count = $stmt->fetch(PDO::FETCH_ASSOC)['pending_count'];
-    
-    if($pending_count > 0) {
-        $courses_needing_attention[] = [
-            'course' => $course,
-            'pending_submissions' => $pending_count
-        ];
-    }
-}
 
 require_once '../includes/header.php';
 ?>
@@ -222,11 +268,20 @@ require_once '../includes/header.php';
                     <?php foreach($courses_needing_attention as $item): ?>
                     <div class="list-group-item">
                         <div class="d-flex w-100 justify-content-between">
-                            <h6 class="mb-1"><?php echo htmlspecialchars($item['course']['title']); ?></h6>
-                            <span class="badge bg-warning"><?php echo $item['pending_submissions']; ?> pending</span>
+                            <h6 class="mb-1"><?php echo e($item['course']['title']); ?></h6>
+                            <span class="badge bg-warning"><?php echo (int)$item['pending_submissions']; ?> pending</span>
                         </div>
                         <p class="mb-1 small text-muted">Submissions waiting for grading</p>
-                        <a href="assignment_submissions.php?course=<?php echo $item['course']['course_id']; ?>" class="btn btn-sm btn-warning mt-2">Grade Submissions</a>
+                        <div class="d-flex gap-2 mt-2">
+                            <?php if(!empty($item['assignment_id'])): ?>
+                                <a href="assignment_submissions.php?id=<?php echo (int)$item['assignment_id']; ?>" class="btn btn-sm btn-warning">
+                                    Grade Submissions
+                                </a>
+                            <?php endif; ?>
+                            <a href="course_manage.php?id=<?php echo (int)$item['course']['course_id']; ?>" class="btn btn-sm btn-outline-secondary">
+                                Open Course
+                            </a>
+                        </div>
                     </div>
                     <?php endforeach; ?>
                 </div>

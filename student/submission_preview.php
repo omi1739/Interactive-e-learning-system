@@ -12,15 +12,16 @@ if(!isset($_GET['id'])) {
 $submission_id = $_GET['id'];
 $conn = $db->getConnection();
 
-// Get submission details
+// Get submission details.
+// The author's name is resolved by review_author_label() rather than joined
+// here, so a reviewer previewing a peer's work cannot see whose it is. The
+// owner and instructors still get the real name.
 $stmt = $conn->prepare("SELECT s.*, a.title as assignment_title, a.assignment_id,
-                               u.first_name, u.last_name, u.username,
                                c.title as course_title, c.course_id
                         FROM submissions s
                         JOIN assignments a ON s.assignment_id = a.assignment_id
                         JOIN modules m ON a.module_id = m.module_id
                         JOIN courses c ON m.course_id = c.course_id
-                        JOIN users u ON s.student_id = u.user_id
                         WHERE s.submission_id = ?");
 $stmt->execute([$submission_id]);
 $submission = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -66,7 +67,21 @@ require_once '../includes/header.php';
                     <h6>Assignment Information</h6>
                     <p><strong>Assignment:</strong> <?php echo htmlspecialchars($submission['assignment_title']); ?></p>
                     <p><strong>Course:</strong> <?php echo htmlspecialchars($submission['course_title']); ?></p>
-                    <p><strong>Student:</strong> <?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></p>
+                    <p><strong>Student:</strong>
+                        <?php
+                        // The owner sees their own name; an assigned reviewer
+                        // must not learn whose submission this is.
+                        $author_label = review_author_label(
+                            ['student_id' => $submission['student_id']],
+                            $_SESSION['user_id'],
+                            $_SESSION['role'] ?? 'student'
+                        );
+                        ?>
+                        <span class="<?php echo $author_label === 'Anonymous classmate' ? 'text-primary' : ''; ?>">
+                            <i class="fas <?php echo $author_label === 'Anonymous classmate' ? 'fa-user-secret' : 'fa-user'; ?> me-1" aria-hidden="true"></i><?php
+                            echo e($author_label); ?>
+                        </span>
+                    </p>
                     <p><strong>Submitted:</strong> <?php echo date('M j, Y g:i A', strtotime($submission['submission_date'])); ?></p>
                     <p><strong>Status:</strong> 
                         <span class="badge bg-<?php 

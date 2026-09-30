@@ -22,7 +22,9 @@ $stmt->execute([$assignment_id]);
 $assignment = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if(!$assignment) {
-    $_SESSION['error'] = "Assignment not found.";
+    // flash_error(), not $_SESSION['error']: this immediately redirects, and
+    // assignments.php never reads the old key, so the message was discarded.
+    flash_error("Assignment not found.");
     $auth->redirect('assignments.php');
 }
 
@@ -32,7 +34,7 @@ $stmt->execute([$_SESSION['user_id'], $assignment['course_id']]);
 $enrollment = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if(!$enrollment) {
-    $_SESSION['error'] = "You are not enrolled in this course.";
+    flash_error("You are not enrolled in this course.");
     $auth->redirect('assignments.php');
 }
 
@@ -282,7 +284,11 @@ require_once '../includes/header.php';
                     <?php echo csrf_field(); ?>
                     <?php if(in_array($assignment['submission_format'], ['text', 'both'])): ?>
                         <div class="mb-3">
-                            <label for="submission_text" class="form-label">Text Submission <?php echo e(in_array($assignment['submission_format'], ['text']) ? '<span class="text-danger">*</span>' : ''); ?></label>
+                            <label for="submission_text" class="form-label">Text Submission
+                            <?php if(in_array($assignment['submission_format'], ['text'], true)): ?>
+                                <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden"> (required)</span>
+                            <?php endif; ?>
+                        </label>
                             <textarea class="form-control" id="submission_text" name="submission_text" rows="6"
                                 placeholder="Enter your assignment text here..."><?php echo htmlspecialchars($submission['submission_text'] ?? ''); ?></textarea>
                             <div class="form-text"><?php echo e(in_array($assignment['submission_format'], ['text']) ? 'Text submission is required.' : 'Optional text submission'); ?></div>
@@ -291,15 +297,23 @@ require_once '../includes/header.php';
 
                     <?php if(in_array($assignment['submission_format'], ['file', 'both'])): ?>
                         <div class="mb-3">
-                            <label for="submission_file" class="form-label">File Upload <?php echo e(in_array($assignment['submission_format'], ['file']) ? '<span class="text-danger">*</span>' : ''); ?></label>
-                            <input type="file" class="form-control" id="submission_file" name="submission_file"
-                                accept="<?php echo htmlspecialchars($assignment['allowed_file_types'] ?? '*'); ?>">
-                            <div class="form-text">
-                                Max file size: <?php echo htmlspecialchars($assignment['max_file_size'] ?? 10); ?>MB
-                                <?php if($assignment['allowed_file_types']): ?>
-                                    | Allowed types: <?php echo htmlspecialchars($assignment['allowed_file_types']); ?>
+                            <label for="submission_file" class="form-label">File Upload
+                                <?php if(in_array($assignment['submission_format'], ['file'], true)): ?>
+                                    <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden"> (required)</span>
                                 <?php endif; ?>
-                                <?php echo e(in_array($assignment['submission_format'], ['file']) ? '| File upload is required.' : '| Optional file upload'); ?>
+                            </label>
+                            <input type="file" class="form-control" id="submission_file" name="submission_file"
+                                accept="<?php echo e_attr(ui_accept_list($assignment['allowed_file_types'] ?? '')); ?>">
+                            <div class="form-text">
+                                Max file size: <?php echo ui_num($assignment['max_file_size'] ?? 10); ?> MB
+                                <?php if($assignment['allowed_file_types']): ?>
+                                    | Allowed types: <?php echo e(str_replace(',', ', ', (string)$assignment['allowed_file_types'])); ?>
+                                <?php endif; ?>
+                                <?php if(in_array($assignment['submission_format'], ['file'], true)): ?>
+                                    | <span class="text-danger">A file upload is required.</span>
+                                <?php else: ?>
+                                    | Optional
+                                <?php endif; ?>
                             </div>
                         </div>
                     <?php endif; ?>
@@ -381,21 +395,6 @@ require_once '../includes/header.php';
                 </div>
             </div>
         <?php endif; ?>
-    </div>
-</div>
-
-<!-- Debug Section - Remove this after testing -->
-<div class="card mt-4 bg-light">
-    <div class="card-header">
-        <h6 class="card-title mb-0">Debug Information</h6>
-    </div>
-    <div class="card-body">
-        <p><strong>Assignment ID:</strong> <?php echo $assignment_id; ?></p>
-        <p><strong>User ID:</strong> <?php echo $_SESSION['user_id']; ?></p>
-        <p><strong>Submission Format:</strong> <?php echo e($assignment['submission_format']); ?></p>
-        <p><strong>Existing Submission:</strong> <?php echo $submission ? 'Yes (ID: ' . $submission['submission_id'] . ')' : 'No'; ?></p>
-        <p><strong>PHP Upload Max Size:</strong> <?php echo ini_get('upload_max_filesize'); ?></p>
-        <p><strong>PHP Post Max Size:</strong> <?php echo ini_get('post_max_size'); ?></p>
     </div>
 </div>
 
