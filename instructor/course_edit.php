@@ -136,42 +136,93 @@ if($_POST && isset($_POST['delete_module'])) {
 // Handle lesson creation
 if($_POST && isset($_POST['create_lesson'])) {
     verify_csrf();
-    $module_id = intval($_POST['module_id']);
-    $lesson_title = trim($_POST['lesson_title']);
-    $content_type = $_POST['content_type'] ?? 'text';
-    $duration = intval($_POST['duration_minutes'] ?? 15);
+    $module_id = intval($_POST['module_id'] ?? 0);
+    $lesson_title = trim($_POST['lesson_title'] ?? '');
+    $duration = max(0, min(600, intval($_POST['duration_minutes'] ?? 15)));
     $content = trim($_POST['lesson_content'] ?? '');
-    
-    if(!empty($lesson_title)) {
-        $stmt = $conn->prepare("INSERT INTO lessons (module_id, title, content, content_type, duration_minutes, is_published) VALUES (?, ?, ?, ?, ?, 1)");
-        if($stmt->execute([$module_id, $lesson_title, $content, $content_type, $duration])) {
+
+    // content_type is an ENUM column. Passing the raw POST value let an
+    // arbitrary string reach MySQL: in strict mode the insert failed with a
+    // driver error, and in non-strict mode it silently became an empty value.
+    $valid_types = ['text', 'video', 'document', 'images'];
+    $content_type = in_array($_POST['content_type'] ?? '', $valid_types, true)
+        ? $_POST['content_type']
+        : 'text';
+
+    if($module_id <= 0) {
+        $_SESSION['error'] = "Choose a module for the lesson.";
+    } elseif($lesson_title === '') {
+        $_SESSION['error'] = "Lesson title is required.";
+    } elseif(mb_strlen($lesson_title) > 200) {
+        $_SESSION['error'] = "Lesson title must be 200 characters or fewer.";
+    } elseif(!instructor_owns_module($conn, $module_id, $_SESSION['user_id'])) {
+        // The module_id is a form field, so it must be proven to belong to a
+        // course this instructor owns. Without this check any instructor could
+        // POST someone else's module_id and write a lesson into their course.
+        $_SESSION['error'] = "That module was not found in one of your courses.";
+        error_log("Rejected cross-course lesson insert: user {$_SESSION['user_id']} -> module {$module_id}");
+    } else {
+        // Append after the current last lesson so ordering stays stable.
+        $order_stmt = $conn->prepare("SELECT COALESCE(MAX(lesson_order), 0) + 1 FROM lessons WHERE module_id = ?");
+        $order_stmt->execute([$module_id]);
+        $lesson_order = (int) $order_stmt->fetchColumn();
+
+        $stmt = $conn->prepare("INSERT INTO lessons (module_id, title, content, content_type, duration_minutes, lesson_order, is_published) VALUES (?, ?, ?, ?, ?, ?, 1)");
+        if($stmt->execute([$module_id, $lesson_title, $content, $content_type, $duration, $lesson_order])) {
             $_SESSION['success'] = "Lesson added successfully!";
-            header("Location: course_edit.php?id=" . $course_id);
-            exit();
+        } else {
+            $_SESSION['error'] = "Failed to add the lesson. Please try again.";
+            error_log("Lesson insert failed: " . json_encode($stmt->errorInfo()));
         }
     }
+    header("Location: course_edit.php?id=" . $course_id);
+    exit();
 }
 
-// Get success/error messages from session
-$success = $_SESSION['success'] ?? '';
-$error = $_SESSION['error'] ?? '';
-unset($_SESSION['success'], $_SESSION['error']);
+// Get modules plus their lessons and assignments in three queries rather than
+// two extra round trips per module (the previous per-module loop issued 2*N
+// queries, which is slow on a course with many modules).
+$modules = [];
+$lessons_by_module = [];
+$assignments_by_module = [];
 
-// Get modules and their lessons for this course
-$stmt = $conn->prepare("SELECT * FROM modules WHERE course_id = ? ORDER BY module_order ASC");
+$stmt = $conn->prepare("SELECT * FROM modules WHERE course_id = ? ORDER BY module_order ASC, module_id ASC");
 $stmt->execute([$course_id]);
 $modules = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-foreach($modules as &$mod) {
-    $stmt = $conn->prepare("SELECT * FROM lessons WHERE module_id = ? ORDER BY lesson_order ASC");
-    $stmt->execute([$mod['module_id']]);
-    $mod['lessons'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$module_ids = array_column($modules, 'module_id');
 
-    $stmt = $conn->prepare("SELECT * FROM assignments WHERE module_id = ?");
-    $stmt->execute([$mod['module_id']]);
-    $mod['assignments'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+if ($module_ids > 0) {
+    $in = implode(',', array_fill(0, count($module_ids), '?'));
+
+    $stmt = $conn->prepare("SELECT * FROM lessons WHERE module_id IN ($in) ORDER BY lesson_order ASC, lesson_id ASC");
+    $stmt->execute($module_ids);
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $lesson) {
+        $lessons_by_module[$lesson['module_id']][] = $lesson;
+    }
+
+    $stmt = $conn->prepare("SELECT * FROM assignments WHERE module_id IN ($in) ORDER BY due_date ASC");
+    $stmt->execute($module_ids);
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $assignment) {
+        $assignments_by_module[$assignment['module_id']][] = $assignment;
+    }
+}
+
+foreach ($modules as $i => $mod) {
+    $mid = (int) $mod['module_id'];
+    $modules[$i]['lessons'] = $lessons_by_module[$mid] ?? [];
+    $modules[$i]['assignments'] = $assignments_by_module[$mid] ?? [];
 }
 unset($mod);
+
+// This page reports every outcome through $_SESSION['error'] / $_SESSION['success']
+// (20 write sites) and renders $error / $success further down, but nothing ever
+// assigned those locals from the session - so every message was invisible and the
+// alerts never rendered. Drain them here, and clear the keys so a reload does not
+// replay an old message.
+$error = $_SESSION['error'] ?? '';
+$success = $_SESSION['success'] ?? '';
+unset($_SESSION['error'], $_SESSION['success']);
 
 require_once '../includes/header.php';
 ?>

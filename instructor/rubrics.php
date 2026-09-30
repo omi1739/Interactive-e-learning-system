@@ -1,337 +1,404 @@
-<?php
+﻿<?php
+/**
+ * Rubric criteria for one assignment.
+ *
+ * Rubric rows are addressed by rubric_id in the URL/form. Every write
+ * therefore re-checks that the rubric belongs to the assignment the
+ * instructor is actually allowed to manage - not merely that the assignment
+ * belongs to them. Filtering on rubric_id alone let any signed-in instructor
+ * rewrite or delete a rubric belonging to a different instructor's course.
+ */
+
 require_once '../includes/bootstrap.php';
 
-if(!$auth->isLoggedIn() || !$auth->hasRole('instructor')) {
-    $auth->redirect('../login.php');
-}
+$auth->requireRole('instructor');
 
-if(!isset($_GET['assignment_id'])) {
-    $_SESSION['error'] = "Assignment ID is required.";
-    header("Location: assignments.php");
-    exit();
-}
-
-$assignment_id = intval($_GET['assignment_id'] ?? 0);
 $conn = $db->getConnection();
+$instructor_id = (int) $_SESSION['user_id'];
+$assignment_id = param_int('assignment_id', 0, $_GET);
 
-// Get assignment details
-$stmt = $conn->prepare("SELECT a.*, m.title as module_title, c.title as course_title, c.course_id
-                       FROM assignments a
-                       JOIN modules m ON a.module_id = m.module_id
-                       JOIN courses c ON m.course_id = c.course_id
-                       WHERE a.assignment_id = ?");
-$stmt->execute([$assignment_id]);
-$assignment = $stmt->fetch(PDO::FETCH_ASSOC);
-
-if(!$assignment) {
-    $_SESSION['error'] = "Assignment not found.";
-    header("Location: assignments.php");
-    exit();
+if ($assignment_id <= 0) {
+    flash_error('Choose an assignment before managing its rubrics.');
+    redirect_to(app_url('assignments.php'));
 }
 
-// Check if instructor owns this course
-$stmt = $conn->prepare("SELECT * FROM courses WHERE course_id = ? AND instructor_id = ?");
-$stmt->execute([$assignment['course_id'], $_SESSION['user_id']]);
-$course = $stmt->fetch(PDO::FETCH_ASSOC);
+$assignment = require_assignment_ownership($conn, $assignment_id, $instructor_id, 'assignments.php');
 
-if(!$course) {
-    $_SESSION['error'] = "You are not authorized to manage rubrics for this assignment.";
-    header("Location: assignments.php");
-    exit();
-}
+/* ------------------------------------------------------------------ */
+/* Handle actions                                                      */
+/* ------------------------------------------------------------------ */
 
-// Get existing rubrics
-$stmt = $conn->prepare("SELECT * FROM rubrics WHERE assignment_id = ? ORDER BY rubric_order");
-$stmt->execute([$assignment_id]);
-$rubrics = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Handle form actions
-if($_POST) {
+if (is_post()) {
     verify_csrf();
-    if(isset($_POST['add_rubric'])) {
-        $criterion_name = trim($_POST['criterion_name']);
-        $description = trim($_POST['description']);
-        $max_score = floatval($_POST['max_score']);
-        $weight = floatval($_POST['weight'] ?? 1.0);
-        
-        if(empty($criterion_name) || $max_score <= 0) {
-            $_SESSION['error'] = "Criterion name and max score are required.";
+
+    // A rubric id that is not part of this assignment is rejected outright
+    // rather than silently ignored, so a stale page cannot half-succeed.
+    $rubric_belongs = static function ($conn, $rubric_id, $assignment_id) {
+        $stmt = $conn->prepare('SELECT rubric_id FROM rubrics WHERE rubric_id = ? AND assignment_id = ? LIMIT 1');
+        $stmt->execute([(int) $rubric_id, (int) $assignment_id]);
+        return $stmt->fetchColumn() !== false;
+    };
+
+    if (isset($_POST['add_rubric'])) {
+        $criterion_name = param_str('criterion_name');
+        $description = param_str('description');
+        $max_score = (float) param_str('max_score', '0');
+        $weight = (float) param_str('weight', '1.0');
+
+        if ($criterion_name === '') {
+            flash_error('Give the criterion a name.');
+        } elseif ($max_score <= 0) {
+            flash_error('The maximum score must be greater than zero.');
+        } elseif ($weight <= 0) {
+            flash_error('The weight must be greater than zero.');
         } else {
-            // Get next order
-            $stmt = $conn->prepare("SELECT MAX(rubric_order) as max_order FROM rubrics WHERE assignment_id = ?");
+            $stmt = $conn->prepare(
+                'SELECT COALESCE(MAX(rubric_order), 0) + 1 FROM rubrics WHERE assignment_id = ?'
+            );
             $stmt->execute([$assignment_id]);
-            $result = $stmt->fetch(PDO::FETCH_ASSOC);
-            $next_order = $result['max_order'] + 1;
-            
-            $stmt = $conn->prepare("INSERT INTO rubrics (assignment_id, criterion_name, description, max_score, weight, rubric_order) VALUES (?, ?, ?, ?, ?, ?)");
-            if($stmt->execute([$assignment_id, $criterion_name, $description, $max_score, $weight, $next_order])) {
-                $_SESSION['success'] = "Rubric criterion added successfully.";
-            } else {
-                $_SESSION['error'] = "Failed to add rubric criterion.";
-            }
+            $next_order = (int) $stmt->fetchColumn();
+
+            $stmt = $conn->prepare(
+                'INSERT INTO rubrics (assignment_id, criterion_name, description, max_score, weight, rubric_order)
+                 VALUES (?, ?, ?, ?, ?, ?)'
+            );
+            $stmt->execute([$assignment_id, $criterion_name, $description, $max_score, $weight, $next_order]);
+
+            flash_success('Criterion "' . $criterion_name . '" added.');
         }
-    } elseif(isset($_POST['update_rubric'])) {
-        $rubric_id = $_POST['rubric_id'];
-        $criterion_name = trim($_POST['criterion_name']);
-        $description = trim($_POST['description']);
-        $max_score = floatval($_POST['max_score']);
-        $weight = floatval($_POST['weight'] ?? 1.0);
-        
-        if(empty($criterion_name) || $max_score <= 0) {
-            $_SESSION['error'] = "Criterion name and max score are required.";
+    } elseif (isset($_POST['update_rubric'])) {
+        $rubric_id = param_int('rubric_id', 0, $_POST);
+        $criterion_name = param_str('criterion_name');
+        $description = param_str('description');
+        $max_score = (float) param_str('max_score', '0');
+        $weight = (float) param_str('weight', '1.0');
+
+        if (!$rubric_belongs($conn, $rubric_id, $assignment_id)) {
+            flash_error('That criterion does not belong to this assignment.');
+        } elseif ($criterion_name === '') {
+            flash_error('Give the criterion a name.');
+        } elseif ($max_score <= 0) {
+            flash_error('The maximum score must be greater than zero.');
+        } elseif ($weight <= 0) {
+            flash_error('The weight must be greater than zero.');
         } else {
-            $stmt = $conn->prepare("UPDATE rubrics SET criterion_name = ?, description = ?, max_score = ?, weight = ? WHERE rubric_id = ?");
-            if($stmt->execute([$criterion_name, $description, $max_score, $weight, $rubric_id])) {
-                $_SESSION['success'] = "Rubric criterion updated successfully.";
-            } else {
-                $_SESSION['error'] = "Failed to update rubric criterion.";
-            }
+            $stmt = $conn->prepare(
+                'UPDATE rubrics
+                    SET criterion_name = ?, description = ?, max_score = ?, weight = ?
+                  WHERE rubric_id = ? AND assignment_id = ?'
+            );
+            $stmt->execute([$criterion_name, $description, $max_score, $weight, $rubric_id, $assignment_id]);
+
+            flash_success('Criterion updated.');
         }
-    } elseif(isset($_POST['delete_rubric'])) {
-        $rubric_id = $_POST['rubric_id'];
-        
-        $stmt = $conn->prepare("DELETE FROM rubrics WHERE rubric_id = ?");
-        if($stmt->execute([$rubric_id])) {
-            $_SESSION['success'] = "Rubric criterion deleted successfully.";
+    } elseif (isset($_POST['delete_rubric'])) {
+        $rubric_id = param_int('rubric_id', 0, $_POST);
+
+        if (!$rubric_belongs($conn, $rubric_id, $assignment_id)) {
+            flash_error('That criterion does not belong to this assignment.');
         } else {
-            $_SESSION['error'] = "Failed to delete rubric criterion.";
+            $stmt = $conn->prepare('DELETE FROM rubrics WHERE rubric_id = ? AND assignment_id = ?');
+            $stmt->execute([$rubric_id, $assignment_id]);
+            flash_success('Criterion deleted.');
         }
-    } elseif(isset($_POST['reorder_rubrics'])) {
-        // The client posts a comma-separated id list (see the JS at the bottom
-        // of this file). Accept both that and a plain array.
+    } elseif (isset($_POST['reorder_rubrics'])) {
+        // The client posts a comma-separated id list, or a plain array.
         $raw_order = $_POST['order'] ?? [];
-        if(is_string($raw_order)) {
+        if (is_string($raw_order)) {
             $raw_order = array_filter(array_map('trim', explode(',', $raw_order)), static fn($v) => $v !== '');
         }
-        if(!is_array($raw_order)) {
+        if (!is_array($raw_order)) {
             $raw_order = [];
         }
 
-        // Only accept ids that really belong to this assignment, and set the
-        // order from the array position (re-numbering 0..n-1 in the DB).
-        $position = 1;
-        foreach($raw_order as $rubric_id) {
-            $rubric_id = intval($rubric_id);
-            if($rubric_id <= 0) {
-                continue;
+        // Only ids that really belong to this assignment are renumbered, so a
+        // crafted order list cannot reorder another instructor's criteria.
+        $conn->beginTransaction();
+        try {
+            $stmt = $conn->prepare(
+                'UPDATE rubrics SET rubric_order = ? WHERE rubric_id = ? AND assignment_id = ?'
+            );
+
+            $position = 1;
+            foreach ($raw_order as $rubric_id) {
+                $rubric_id = (int) $rubric_id;
+                if ($rubric_id <= 0) {
+                    continue;
+                }
+                $stmt->execute([$position, $rubric_id, $assignment_id]);
+                $position++;
             }
-            $stmt = $conn->prepare("UPDATE rubrics SET rubric_order = ?
-                                    WHERE rubric_id = ? AND assignment_id = ?");
-            $stmt->execute([$position, $rubric_id, $assignment_id]);
-            $position++;
+            $conn->commit();
+            flash_success('Criteria reordered.');
+        } catch (PDOException $e) {
+            if ($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+            error_log('Rubric reorder failed: ' . $e->getMessage());
+            flash_error('Could not save the new order. Please try again.');
         }
-        $_SESSION['success'] = "Rubrics reordered successfully.";
     }
-    
-    header("Location: rubrics.php?assignment_id=" . $assignment_id);
-    exit();
+
+    // PRG: a reload must not repeat the write.
+    redirect_to(app_url('rubrics.php', ['assignment_id' => $assignment_id]));
 }
 
+/* ------------------------------------------------------------------ */
+/* Read                                                                */
+/* ------------------------------------------------------------------ */
+
+$stmt = $conn->prepare('SELECT * FROM rubrics WHERE assignment_id = ? ORDER BY rubric_order, rubric_id');
+$stmt->execute([$assignment_id]);
+$rubrics = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$criteria_total = 0.0;
+$criteria_weight = 0.0;
+foreach ($rubrics as $r) {
+    $criteria_total += (float) $r['max_score'];
+    $criteria_weight += (float) $r['weight'];
+}
+
+$page_title = 'Rubric: ' . $assignment['title'];
 require_once '../includes/header.php';
 ?>
 
-<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <h1 class="h2">Manage Rubrics</h1>
-    <div class="btn-toolbar mb-2 mb-md-0">
-        <a href="assignment_view.php?id=<?php echo $assignment_id; ?>" class="btn btn-secondary">
-            <i class="fas fa-arrow-left"></i> Back to Assignment
-        </a>
-    </div>
-</div>
+<?php echo ui_breadcrumbs([
+    ['label' => 'Assignments', 'url' => 'assignments.php'],
+    ['label' => $assignment['title'], 'url' => 'assignment_view.php?id=' . (int) $assignment_id],
+    ['label' => 'Rubric'],
+], 'My Courses', 'courses.php'); ?>
 
-<?php if(isset($_SESSION['success'])): ?>
-<div class="alert alert-success alert-dismissible fade show" role="alert">
-    <?php echo e($_SESSION['success']); ?>
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-</div>
-<?php unset($_SESSION['success']); endif; ?>
+<?php
+echo ui_page_header(
+    'Rubric criteria',
+    'Criteria are shown to students when they review a peer submission, so keep each one specific and easy to judge.',
+    '<a class="btn btn-outline-secondary" href="' . e_attr(app_url('assignment_view.php', ['id' => $assignment_id])) . '">'
+        . '<i class="fas fa-arrow-left me-1" aria-hidden="true"></i> Back to assignment</a>',
+    $assignment['course_title']
+);
+?>
 
-<?php if(isset($_SESSION['error'])): ?>
-<div class="alert alert-danger alert-dismissible fade show" role="alert">
-    <?php echo e($_SESSION['error']); ?>
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-</div>
-<?php unset($_SESSION['error']); endif; ?>
-
-<div class="row">
-    <div class="col-md-8">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Rubric Criteria</h5>
-            </div>
-            <div class="card-body">
-                <?php if(count($rubrics) > 0): ?>
-                    <form method="POST" id="reorderForm">
-                        <?php echo csrf_field(); ?>
-                        <ul id="rubricsList" class="list-group">
-                            <?php foreach($rubrics as $rubric): ?>
-                            <li class="list-group-item d-flex justify-content-between align-items-center" data-id="<?php echo $rubric['rubric_id']; ?>">
-                                <div class="flex-grow-1">
-                                    <h6><?php echo htmlspecialchars($rubric['criterion_name']); ?></h6>
-                                    <p class="mb-1"><?php echo htmlspecialchars($rubric['description']); ?></p>
-                                    <small class="text-muted">Max Score: <?php echo $rubric['max_score']; ?> | Weight: <?php echo $rubric['weight']; ?></small>
-                                </div>
-                                <div class="btn-group">
-                                    <button type="button" class="btn btn-sm btn-outline-primary edit-rubric" data-bs-toggle="modal" data-bs-target="#editRubricModal" 
-                                            data-id="<?php echo $rubric['rubric_id']; ?>" 
-                                            data-name="<?php echo htmlspecialchars($rubric['criterion_name']); ?>" 
-                                            data-desc="<?php echo htmlspecialchars($rubric['description']); ?>" 
-                                            data-max="<?php echo $rubric['max_score']; ?>" 
-                                            data-weight="<?php echo $rubric['weight']; ?>">
-                                        <i class="fas fa-edit"></i>
-                                    </button>
-                                    <button type="submit" name="delete_rubric" class="btn btn-sm btn-outline-danger" 
-                                            onclick="return confirm('Are you sure you want to delete this rubric criterion?')">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
-                                    <input type="hidden" name="rubric_id" value="<?php echo $rubric['rubric_id']; ?>">
-                                </div>
-                            </li>
-                            <?php endforeach; ?>
-                        </ul>
-                        <input type="hidden" name="reorder_rubrics" value="1">
-                        <input type="hidden" name="order" id="rubricOrder">
-                    </form>
-                <?php else: ?>
-                    <div class="text-center py-4">
-                        <i class="fas fa-clipboard-list fa-3x text-muted mb-3"></i>
-                        <h5 class="text-muted">No Rubric Criteria</h5>
-                        <p class="text-muted">Get started by adding your first rubric criterion.</p>
-                    </div>
+<div class="row g-3 g-lg-4">
+    <div class="col-lg-8">
+        <section class="surface" aria-labelledby="criteriaHeading">
+            <div class="surface__head">
+                <h2 class="surface__title" id="criteriaHeading">
+                    <i class="fas fa-list-check" aria-hidden="true"></i> Criteria
+                </h2>
+                <?php if ($rubrics): ?>
+                    <span class="surface__meta"><?php echo count($rubrics) ?> criterion<?php echo count($rubrics) === 1 ? '' : 'a'; ?></span>
                 <?php endif; ?>
             </div>
-        </div>
+
+            <?php if (!$rubrics): ?>
+                <div class="surface__body">
+                    <?php echo ui_empty_state(
+                        'fa-clipboard-list',
+                        'No criteria yet',
+                        'Add the first criterion using the form beside this panel. Students will see these while reviewing a peer.'
+                    ); ?>
+                </div>
+            <?php else: ?>
+                <div class="surface__body">
+                    <p class="text-muted mb-3" style="font-size:.8125rem">
+                        <i class="fas fa-hand-pointer me-1" aria-hidden="true"></i>
+                        Drag a criterion by its handle to change the order students see it in.
+                    </p>
+
+                    <form method="POST" data-sortable data-sortable-field="#rubricOrder"
+                          data-sortable-handle=".sortable-handle" data-sortable-autosubmit
+                          id="reorderForm">
+                        <?php echo csrf_field(); ?>
+                        <input type="hidden" name="reorder_rubrics" value="1">
+                        <input type="hidden" name="order" id="rubricOrder">
+
+                        <div data-sortable-container>
+                            <?php foreach ($rubrics as $rubric): ?>
+                                <?php $rid = (int) $rubric['rubric_id']; ?>
+                                <div class="sortable-item" draggable="true" data-sortable-item="<?php echo $rid; ?>">
+                                    <div class="d-flex align-items-start gap-2">
+                                        <button type="button" class="sortable-handle" aria-label="Reorder <?php echo e($rubric['criterion_name']); ?>">
+                                            <i class="fas fa-grip-vertical" aria-hidden="true"></i>
+                                        </button>
+
+                                        <div class="flex-grow-1 min-w-0">
+                                            <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                                                <span class="chip-mono">#<?php echo (int) $rubric['rubric_order']; ?></span>
+                                                <h3 class="h6 mb-0"><?php echo e($rubric['criterion_name']); ?></h3>
+                                            </div>
+
+                                            <?php if (trim((string) $rubric['description']) !== ''): ?>
+                                                <p class="text-muted mb-2 break-words-anywhere" style="font-size:.8125rem">
+                                                    <?php echo e($rubric['description']); ?>
+                                                </p>
+                                            <?php endif; ?>
+
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <?php echo ui_badge('Max ' . ui_num($rubric['max_score']), 'primary', 'fa-bullseye'); ?>
+                                                <?php echo ui_badge('Weight x' . ui_num($rubric['weight']), 'neutral', 'fa-scale-balanced'); ?>
+                                            </div>
+                                        </div>
+
+                                        <div class="d-flex flex-column flex-sm-row gap-1">
+                                            <button type="button" class="btn btn-sm btn-outline-secondary edit-rubric"
+                                                    data-bs-toggle="modal" data-bs-target="#editRubricModal"
+                                                    data-id="<?php echo $rid; ?>"
+                                                    data-name="<?php echo e_attr($rubric['criterion_name']); ?>"
+                                                    data-desc="<?php echo e_attr($rubric['description']); ?>"
+                                                    data-max="<?php echo e_attr($rubric['max_score']); ?>"
+                                                    data-weight="<?php echo e_attr($rubric['weight']); ?>"
+                                                    aria-label="Edit <?php echo e_attr($rubric['criterion_name']); ?>">
+                                                <i class="fas fa-pen" aria-hidden="true"></i>
+                                            </button>
+
+                                            <button type="submit" name="delete_rubric" value="<?php echo $rid; ?>"
+                                                    class="btn btn-sm btn-outline-danger"
+                                                    formnovalidate
+                                                    data-confirm="Delete the criterion &quot;<?php echo e_attr($rubric['criterion_name']); ?>&quot;? Reviews already scored with it keep their numbers, but the criterion will be removed from the form."
+                                                    aria-label="Delete <?php echo e_attr($rubric['criterion_name']); ?>">
+                                                <i class="fas fa-trash" aria-hidden="true"></i>
+                                            </button>
+                                            <input type="hidden" name="rubric_id" value="<?php echo $rid; ?>">
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </form>
+
+                    <div class="surface surface__body--flush mt-3" style="background:var(--bg-inset)">
+                        <dl class="detail-list p-3 mb-0">
+                            <?php echo ui_detail_row('Total points', e(ui_num($criteria_total))); ?>
+                            <?php echo ui_detail_row(
+                                'Points against the assignment maximum',
+                                ui_badge(
+                                    $criteria_total > 0
+                                        ? (string) ui_percent($criteria_total, $assignment['max_points']) . '%'
+                                        : 'n/a',
+                                    ui_grade_tone(ui_percent($criteria_total, $assignment['max_points']))
+                                )
+                            ); ?>
+                            <?php echo ui_detail_row('Combined weight', e(ui_num($criteria_weight))); ?>
+                        </dl>
+                    </div>
+                </div>
+            <?php endif; ?>
+        </section>
     </div>
-    
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Add New Criterion</h5>
+
+    <div class="col-lg-4">
+        <section class="surface" aria-labelledby="addHeading">
+            <div class="surface__head">
+                <h2 class="surface__title" id="addHeading">
+                    <i class="fas fa-plus" aria-hidden="true"></i> Add a criterion
+                </h2>
             </div>
-            <div class="card-body">
+            <div class="surface__body">
                 <form method="POST">
                     <?php echo csrf_field(); ?>
+
                     <div class="mb-3">
-                        <label for="criterion_name" class="form-label">Criterion Name *</label>
-                        <input type="text" class="form-control" id="criterion_name" name="criterion_name" required>
+                        <label for="criterion_name" class="form-label">Criterion name <span class="req" aria-hidden="true">*</span></label>
+                        <input type="text" class="form-control" id="criterion_name" name="criterion_name"
+                               required maxlength="150" placeholder="e.g. Code quality">
                     </div>
+
                     <div class="mb-3">
-                        <label for="description" class="form-label">Description</label>
-                        <textarea class="form-control" id="description" name="description" rows="3"></textarea>
+                        <label for="description" class="form-label">What good looks like</label>
+                        <textarea class="form-control" id="description" name="description" rows="3"
+                                  maxlength="1000" data-autogrow
+                                  placeholder="Describe this criterion so two reviewers grade it the same way."></textarea>
                     </div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="max_score" class="form-label">Max Score *</label>
-                                <input type="number" class="form-control" id="max_score" name="max_score" step="0.1" min="0.1" required>
-                            </div>
+
+                    <div class="row g-3">
+                        <div class="col-6">
+                            <label for="max_score" class="form-label">Max points <span class="req" aria-hidden="true">*</span></label>
+                            <input type="number" class="form-control" id="max_score" name="max_score"
+                                   step="0.5" min="0.5" required>
                         </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="weight" class="form-label">Weight</label>
-                                <input type="number" class="form-control" id="weight" name="weight" step="0.1" min="0.1" value="1.0">
-                            </div>
+                        <div class="col-6">
+                            <label for="weight" class="form-label">Weight</label>
+                            <input type="number" class="form-control" id="weight" name="weight"
+                                   step="0.1" min="0.1" value="1.0">
                         </div>
                     </div>
-                    <button type="submit" name="add_rubric" class="btn btn-primary w-100">Add Criterion</button>
+
+                    <button type="submit" name="add_rubric" class="btn btn-primary w-100 mt-3">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i> Add criterion
+                    </button>
                 </form>
             </div>
-        </div>
-        
-        <div class="card mt-3">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Assignment Information</h5>
+        </section>
+
+        <section class="surface mt-3" aria-labelledby="assignmentInfoHeading">
+            <div class="surface__head">
+                <h2 class="surface__title" id="assignmentInfoHeading">
+                    <i class="fas fa-circle-info" aria-hidden="true"></i> Assignment
+                </h2>
             </div>
-            <div class="card-body">
-                <h6><?php echo htmlspecialchars($assignment['title']); ?></h6>
-                <p class="mb-1"><strong>Course:</strong> <?php echo htmlspecialchars($assignment['course_title']); ?></p>
-                <p class="mb-1"><strong>Max Points:</strong> <?php echo $assignment['max_points']; ?></p>
-                <p class="mb-0"><strong>Due Date:</strong> 
-                    <?php echo $assignment['due_date'] ? date('M j, Y g:i A', strtotime($assignment['due_date'])) : 'No due date'; ?>
-                </p>
+            <div class="surface__body">
+                <dl class="detail-list mb-0">
+                    <?php echo ui_detail_row('Title', e($assignment['title'])); ?>
+                    <?php echo ui_detail_row('Course', e($assignment['course_title'])); ?>
+                    <?php echo ui_detail_row('Module', e($assignment['module_title'])); ?>
+                    <?php echo ui_detail_row('Max points', e(ui_num($assignment['max_points']))); ?>
+                    <?php echo ui_detail_row('Due', e(ui_datetime($assignment['due_date'], 'M j, Y g:i A', 'No deadline'))); ?>
+                </dl>
             </div>
-        </div>
+        </section>
     </div>
 </div>
 
-<!-- Edit Rubric Modal -->
-<div class="modal fade" id="editRubricModal" tabindex="-1">
+<div class="modal fade" id="editRubricModal" tabindex="-1" aria-labelledby="editRubricModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Edit Rubric Criterion</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST">
+            <form method="POST" id="editRubricForm">
                 <?php echo csrf_field(); ?>
+                <div class="modal-header">
+                    <h2 class="modal-title" id="editRubricModalLabel">Edit criterion</h2>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
                 <div class="modal-body">
                     <input type="hidden" name="rubric_id" id="edit_rubric_id">
                     <div class="mb-3">
-                        <label for="edit_criterion_name" class="form-label">Criterion Name *</label>
-                        <input type="text" class="form-control" id="edit_criterion_name" name="criterion_name" required>
+                        <label for="edit_criterion_name" class="form-label">Criterion name <span class="req" aria-hidden="true">*</span></label>
+                        <input type="text" class="form-control" id="edit_criterion_name" name="criterion_name" required maxlength="150">
                     </div>
                     <div class="mb-3">
-                        <label for="edit_description" class="form-label">Description</label>
-                        <textarea class="form-control" id="edit_description" name="description" rows="3"></textarea>
+                        <label for="edit_description" class="form-label">What good looks like</label>
+                        <textarea class="form-control" id="edit_description" name="description" rows="3" maxlength="1000" data-autogrow></textarea>
                     </div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="edit_max_score" class="form-label">Max Score *</label>
-                                <input type="number" class="form-control" id="edit_max_score" name="max_score" step="0.1" min="0.1" required>
-                            </div>
+                    <div class="row g-3">
+                        <div class="col-6">
+                            <label for="edit_max_score" class="form-label">Max points <span class="req" aria-hidden="true">*</span></label>
+                            <input type="number" class="form-control" id="edit_max_score" name="max_score" step="0.5" min="0.5" required>
                         </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="edit_weight" class="form-label">Weight</label>
-                                <input type="number" class="form-control" id="edit_weight" name="weight" step="0.1" min="0.1" value="1.0">
-                            </div>
+                        <div class="col-6">
+                            <label for="edit_weight" class="form-label">Weight</label>
+                            <input type="number" class="form-control" id="edit_weight" name="weight" step="0.1" min="0.1" value="1.0">
                         </div>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" name="update_rubric" class="btn btn-primary">Update Criterion</button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" name="update_rubric" class="btn btn-primary">Save changes</button>
                 </div>
             </form>
         </div>
     </div>
 </div>
 
-<?php
-// Drag-and-drop reordering needs jQuery and the jQuery UI sortable widget.
-// Bootstrap does not ship these, so they must be loaded explicitly; without
-// them the reorder feature silently does nothing.
-?>
-<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jquery-ui-dist@1.13.2/jquery-ui.min.js"></script>
 <script>
-// Rubric reordering
-$(document).ready(function() {
-    var $list = $('#rubricsList');
+// Populate the edit modal. Plain vanilla, so no jQuery is required.
+document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.edit-rubric');
+    if (!btn) return;
 
-    if($list.length && $.fn.sortable) {
-        $list.sortable({
-            update: function() {
-                var order = [];
-                $list.find('li').each(function() {
-                    order.push($(this).data('id'));
-                });
-                $('#rubricOrder').val(order.join(','));
-                $('#reorderForm').submit();
-            }
-        });
-    }
-
-    // Edit rubric modal
-    $('.edit-rubric').on('click', function() {
-        var $btn = $(this);
-        $('#edit_rubric_id').val($btn.data('id'));
-        $('#edit_criterion_name').val($btn.data('name'));
-        $('#edit_description').val($btn.data('desc'));
-        $('#edit_max_score').val($btn.data('max'));
-        $('#edit_weight').val($btn.data('weight'));
-    });
+    document.getElementById('edit_rubric_id').value = btn.dataset.id;
+    document.getElementById('edit_criterion_name').value = btn.dataset.name || '';
+    document.getElementById('edit_description').value = btn.dataset.desc || '';
+    document.getElementById('edit_max_score').value = btn.dataset.max || '';
+    document.getElementById('edit_weight').value = btn.dataset.weight || '1.0';
 });
 </script>
 

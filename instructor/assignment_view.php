@@ -26,6 +26,89 @@ if(!$assignment || $assignment['instructor_id'] != $_SESSION['user_id']) {
     $auth->redirect('assignments.php');
 }
 
+// Edit the assignment.
+//
+// The page has already proven this instructor owns the assignment, so the
+// update is scoped to the id rather than re-deriving ownership per field.
+// Values are validated against the column definitions, because MySQL in strict
+// mode would otherwise reject the whole statement with a generic error.
+if($_POST && isset($_POST['update_assignment'])) {
+    verify_csrf();
+
+    $title = trim($_POST['title'] ?? '');
+    $description = trim($_POST['description'] ?? '');
+    // Read from $_POST only: $_REQUEST would let a query string value shadow
+    // the submitted body.
+    $module_id = param_int('module_id', 0, $_POST);
+    $max_points = trim($_POST['max_points'] ?? '');
+    $due_date = mysql_datetime($_POST['due_date'] ?? '');
+    $assignment_type = $_POST['assignment_type'] ?? 'individual';
+    $submission_format = $_POST['submission_format'] ?? 'file';
+    $max_file_size = param_int('max_file_size', 0, $_POST);
+    $allowed_file_types = trim($_POST['allowed_file_types'] ?? '');
+    $is_published = isset($_POST['is_published']) ? 1 : 0;
+
+    $errors = [];
+
+    if($title === '' || mb_strlen($title) > 200) {
+        $errors[] = 'Title is required and must be 200 characters or fewer.';
+    }
+    if($module_id <= 0) {
+        $errors[] = 'Choose a module for this assignment.';
+    } elseif(!instructor_owns_module($conn, $module_id, $_SESSION['user_id'])) {
+        $errors[] = 'That module does not belong to one of your courses.';
+    }
+    if($max_points === '' || !is_numeric($max_points) || (float)$max_points <= 0 || (float)$max_points > 100000) {
+        $errors[] = 'Max points must be a positive number.';
+    }
+    if(!in_array($assignment_type, ['individual', 'group'], true)) {
+        $errors[] = 'Invalid assignment type.';
+    }
+    if(!in_array($submission_format, ['text', 'file', 'both'], true)) {
+        $errors[] = 'Invalid submission format.';
+    }
+    if($max_file_size < 1 || $max_file_size > 100) {
+        $errors[] = 'Maximum file size must be between 1 and 100 MB.';
+    }
+    if($allowed_file_types !== '' && !valid_extension_list($allowed_file_types)) {
+        // Stored as a comma list and matched with LIKE, so keep it to plain
+        // extensions rather than free text that could widen the match.
+        $errors[] = 'File types must be a comma-separated list of extensions, without dots.';
+    }
+
+    if(!empty($errors)) {
+        $error = implode(' ', $errors);
+    } else {
+        try {
+            $stmt = $conn->prepare("UPDATE assignments
+                                    SET title = ?, description = ?, module_id = ?, max_points = ?, due_date = ?,
+                                        assignment_type = ?, submission_format = ?, max_file_size = ?,
+                                        allowed_file_types = ?, is_published = ?
+                                    WHERE assignment_id = ?");
+            $stmt->execute([
+                $title,
+                $description !== '' ? $description : null,
+                $module_id,
+                $max_points,
+                $due_date !== '' ? $due_date : null,
+                $assignment_type,
+                $submission_format,
+                $max_file_size,
+                $allowed_file_types !== '' ? $allowed_file_types : null,
+                $is_published,
+                $assignment_id
+            ]);
+
+            flash_success("Assignment updated.");
+            header("Location: assignment_view.php?id=" . (int)$assignment_id);
+            exit();
+        } catch(PDOException $e) {
+            error_log("Assignment update failed: " . $e->getMessage());
+            $error = "The assignment could not be saved. Check the values and try again.";
+        }
+    }
+}
+
 // Get assignment details for peer review
 $assignment_review = $functions->getAssignmentForReview($assignment_id);
 
@@ -123,17 +206,48 @@ $stmt = $conn->prepare("SELECT s.submission_id, u.first_name, u.last_name, u.use
 $stmt->execute([$assignment_id]);
 $submissions_for_review = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get review statistics
-$stmt = $conn->prepare("SELECT 
-    COUNT(*) as total_reviews,
-    SUM(CASE WHEN pr.status = 'completed' THEN 1 ELSE 0 END) as completed_reviews,
-    AVG(rs.score) as avg_score
+// Get review statistics.
+//
+// These are two separate aggregates on purpose. Joining review_scores into the
+// same query as peer_reviews fans the rows out, so a review covering four
+// criteria used to be counted four times in both COUNT(*) and the SUM(CASE...).
+$stmt = $conn->prepare("SELECT
+        COUNT(*) AS total_reviews,
+        SUM(CASE WHEN pr.status = 'completed' THEN 1 ELSE 0 END) AS completed_reviews
     FROM peer_reviews pr
     JOIN submissions s ON pr.submission_id = s.submission_id
-    LEFT JOIN review_scores rs ON pr.review_id = rs.review_id
     WHERE s.assignment_id = ?");
 $stmt->execute([$assignment_id]);
-$review_stats = $stmt->fetch(PDO::FETCH_ASSOC);
+$review_stats = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['total_reviews' => 0, 'completed_reviews' => 0];
+
+// Average score per completed review: sum each review's criteria first, then
+// average those totals. Averaging the criteria marks directly would let a
+// one-criterion review count the same as a five-criterion one.
+$stmt = $conn->prepare("SELECT AVG(per_review.total_score) FROM (
+        SELECT SUM(rs.score) AS total_score
+        FROM peer_reviews pr
+        JOIN submissions s ON pr.submission_id = s.submission_id
+        JOIN review_scores rs ON rs.review_id = pr.review_id
+        WHERE s.assignment_id = ? AND pr.status = 'completed'
+        GROUP BY pr.review_id
+    ) AS per_review");
+$stmt->execute([$assignment_id]);
+$review_stats['avg_score'] = $stmt->fetchColumn();
+$review_stats['avg_score'] = $review_stats['avg_score'] === null ? null : (float)$review_stats['avg_score'];
+
+// What that average is out of, so it can be shown as a percentage.
+$stmt = $conn->prepare("SELECT COALESCE(SUM(max_score), 0) FROM rubrics WHERE assignment_id = ?");
+$stmt->execute([$assignment_id]);
+$review_stats['rubric_total'] = (float)$stmt->fetchColumn();
+
+// Modules the instructor can move this assignment into, for the edit dialog.
+$stmt = $conn->prepare("SELECT m.module_id, m.title, c.title AS course_title
+                        FROM modules m
+                        JOIN courses c ON m.course_id = c.course_id
+                        WHERE c.instructor_id = ?
+                        ORDER BY c.title, m.module_order, m.title");
+$stmt->execute([$_SESSION['user_id']]);
+$own_modules = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 require_once '../includes/header.php';
 ?>
@@ -306,8 +420,22 @@ require_once '../includes/header.php';
                     <div class="col-md-4">
                         <div class="card bg-light">
                             <div class="card-body">
-                                <h4><?php echo number_format($review_stats['avg_score'] ?? 0, 1); ?></h4>
-                                <p class="mb-0">Avg Score</p>
+                                <h4>
+                                    <?php
+                                    if($review_stats['avg_score'] !== null && $review_stats['rubric_total'] > 0) {
+                                        $peer_pct = ($review_stats['avg_score'] / $review_stats['rubric_total']) * 100;
+                                        echo ui_num($peer_pct, 0) . '%';
+                                    } else {
+                                        echo '<span class="text-muted">&mdash;</span>';
+                                    }
+                                    ?>
+                                </h4>
+                                <p class="mb-0">
+                                    Avg Peer Score
+                                    <?php if($review_stats['rubric_total'] > 0): ?>
+                                        <small class="text-muted">of <?php echo ui_num($review_stats['rubric_total'], 2); ?> rubric pts</small>
+                                    <?php endif; ?>
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -376,9 +504,9 @@ require_once '../includes/header.php';
                 <h5 class="card-title mb-0">Quick Actions</h5>
             </div>
             <div class="card-body">
-                <a href="#" class="btn btn-outline-primary w-100 mb-2" data-bs-toggle="modal" data-bs-target="#editAssignmentModal">
+                <button type="button" class="btn btn-outline-primary w-100 mb-2" data-bs-toggle="modal" data-bs-target="#editAssignmentModal">
                     <i class="fas fa-edit"></i> Edit Assignment
-                </a>
+                </button>
                 <a href="rubrics.php?assignment_id=<?php echo $assignment_id; ?>" class="btn btn-outline-success w-100 mb-2">
                     <i class="fas fa-clipboard-list"></i> Manage Rubric
                 </a>
@@ -407,24 +535,109 @@ require_once '../includes/header.php';
 </div>
 
 <!-- Edit Assignment Modal -->
-<div class="modal fade" id="editAssignmentModal" tabindex="-1">
+<div class="modal fade" id="editAssignmentModal" tabindex="-1" aria-labelledby="editAssignmentModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Edit Assignment</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <h5 class="modal-title" id="editAssignmentModalLabel">Edit Assignment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
-                <p class="text-muted">Assignment editing functionality will be implemented here.</p>
-                <div class="alert alert-info">
-                    <i class="fas fa-info-circle"></i> 
-                    To edit this assignment, go to the assignments list and use the edit option there.
+            <form method="POST" id="editAssignmentForm" data-bs-dismiss="modal">
+                <?php echo csrf_field(); ?>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="edit_title" class="form-label">Title <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="edit_title" name="title" maxlength="200" required
+                               value="<?php echo e_attr($assignment['title']); ?>">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_description" class="form-label">Description</label>
+                        <textarea class="form-control" id="edit_description" name="description" rows="5"
+                                  data-counter="#editDescriptionCount"><?php echo e($assignment['description'] ?? ''); ?></textarea>
+                        <div class="form-text"><span id="editDescriptionCount">0</span> characters</div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_module_id" class="form-label">Module <span class="text-danger">*</span></label>
+                            <select class="form-select" id="edit_module_id" name="module_id" required>
+                                <?php if(empty($own_modules)): ?>
+                                    <option value="">You have no modules yet</option>
+                                <?php endif; ?>
+                                <?php foreach($own_modules as $mod): ?>
+                                    <option value="<?php echo (int)$mod['module_id']; ?>"
+                                        <?php echo (int)$mod['module_id'] === (int)$assignment['module_id'] ? 'selected' : ''; ?>>
+                                        <?php echo e($mod['course_title'] . ' - ' . $mod['title']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <div class="form-text">Moving an assignment does not move its submissions.</div>
+                        </div>
+
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_assignment_type" class="form-label">Type</label>
+                            <select class="form-select" id="edit_assignment_type" name="assignment_type">
+                                <option value="individual" <?php echo $assignment['assignment_type'] === 'individual' ? 'selected' : ''; ?>>Individual</option>
+                                <option value="group" <?php echo $assignment['assignment_type'] === 'group' ? 'selected' : ''; ?>>Group</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_max_points" class="form-label">Max points <span class="text-danger">*</span></label>
+                            <input type="number" class="form-control" id="edit_max_points" name="max_points" min="0.5" step="0.5" required
+                                   value="<?php echo e_attr($assignment['max_points']); ?>">
+                        </div>
+
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_due_date" class="form-label">Due date</label>
+                            <input type="datetime-local" class="form-control" id="edit_due_date" name="due_date"
+                                   value="<?php echo e_attr(mysql_datetime_input($assignment['due_date'] ?? '')); ?>">
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_submission_format" class="form-label">Submission format</label>
+                            <select class="form-select" id="edit_submission_format" name="submission_format">
+                                <option value="file" <?php echo $assignment['submission_format'] === 'file' ? 'selected' : ''; ?>>File upload only</option>
+                                <option value="text" <?php echo $assignment['submission_format'] === 'text' ? 'selected' : ''; ?>>Text only</option>
+                                <option value="both" <?php echo $assignment['submission_format'] === 'both' ? 'selected' : ''; ?>>Text and/or file</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-6 mb-3">
+                            <label for="edit_max_file_size" class="form-label">Max file size (MB)</label>
+                            <input type="number" class="form-control" id="edit_max_file_size" name="max_file_size"
+                                   min="1" max="100" step="1" value="<?php echo (int)$assignment['max_file_size']; ?>">
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_allowed_file_types" class="form-label">Allowed file extensions</label>
+                        <input type="text" class="form-control" id="edit_allowed_file_types" name="allowed_file_types"
+                               value="<?php echo e_attr($assignment['allowed_file_types'] ?? ''); ?>"
+                               placeholder="pdf,doc,docx,zip,txt">
+                        <div class="form-text">Comma separated, no dots. Leave empty to allow the server default.</div>
+                    </div>
+
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch" id="edit_is_published" name="is_published" value="1"
+                               <?php echo $assignment['is_published'] ? 'checked' : ''; ?>>
+                        <label class="form-check-label" for="edit_is_published">
+                            Published &mdash; students can see and submit to this assignment
+                        </label>
+                    </div>
                 </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                <a href="assignments.php?edit=<?php echo $assignment_id; ?>" class="btn btn-primary">Edit Assignment</a>
-            </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" name="update_assignment" value="1" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Save changes
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
