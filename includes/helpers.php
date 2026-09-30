@@ -1139,8 +1139,10 @@ if (!function_exists('ui_status_badge')) {
             'in_progress' => ['In progress', 'warning', 'fa-spinner'],
             'not_started' => ['Not started', 'neutral', 'fa-circle'],
             'completed' => ['Completed', 'success', 'fa-circle-check'],
-            // peer reviews
-            'assigned'  => ['Assigned', 'info', 'fa-user-check'],
+            // Review-adjacent vocabulary. peer_reviews.status is only
+            // ENUM('in_progress','completed') today; the rest are labels for
+            // review-request states that other schemas use, kept here so the
+            // map stays in one place if they are introduced.
             'accepted'  => ['Accepted', 'info', 'fa-inbox'],
             'declined'  => ['Declined', 'neutral', 'fa-inbox'],
             'overdue'   => ['Overdue', 'danger', 'fa-triangle-exclamation'],

@@ -81,12 +81,13 @@ if(count($approved_enrollments) > 0) {
     }
 }
 
-// Get pending peer reviews. Reviews start as 'assigned' and only become
-// 'in_progress' once opened, so counting only 'in_progress' hid every review
-// the student had not started yet.
+// Get peer reviews this student still owes. A review row is created with
+// status 'in_progress' the moment it is assigned (the column is
+// ENUM('in_progress','completed') and every insert uses 'in_progress'),
+// so 'in_progress' is exactly "assigned but not finished".
 $stmt = $conn->prepare("SELECT COUNT(*) as pending_reviews
                        FROM peer_reviews
-                       WHERE reviewer_id = ? AND status IN ('assigned', 'in_progress')");
+                       WHERE reviewer_id = ? AND status = 'in_progress'");
 $stmt->execute([$_SESSION['user_id']]);
 $pending_reviews = (int)$stmt->fetchColumn();
 
