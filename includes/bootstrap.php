@@ -22,7 +22,7 @@ if (!is_file($local_config)) {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Configuration Required</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
     </head>
     <body class="bg-light">
         <div class="container py-5">
@@ -43,6 +43,9 @@ if (!is_file($local_config)) {
                             </p>
                             <pre class="bg-dark text-light p-3 rounded small mt-2 mb-0">mysql -u USER -p DATABASE &lt; database/schema-only.sql
 php install/create_admin.php</pre>
+                            <p class="text-muted small mt-3 mb-0">
+                                See <code>docs/DEPLOY.md</code> for the full checklist.
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -130,7 +133,7 @@ try {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Service Unavailable</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
         </head>
         <body class="bg-light">
             <div class="container py-5">
