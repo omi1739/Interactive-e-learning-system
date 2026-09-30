@@ -103,7 +103,7 @@ if (!function_exists('csrf_fail')) {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Request Blocked</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+            <link href="<?php echo e_attr(asset_url('vendor/bootstrap/bootstrap.min.css')); ?>" rel="stylesheet">
             <link href="<?php echo e_attr(asset_url('css/app.css')); ?>" rel="stylesheet">
         </head>
         <body>
