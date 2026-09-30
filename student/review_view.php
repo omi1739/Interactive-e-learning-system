@@ -7,32 +7,38 @@ if(!$auth->isLoggedIn() || !$auth->hasRole('student')) {
 
 $review_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 if(!$review_id) {
-    $_SESSION['error'] = "Invalid review ID.";
+    // flash_error() survives the redirect; peer_reviews.php never read the
+    // legacy $_SESSION['error'] key, so this message used to vanish.
+    flash_error("Invalid review ID.");
     $auth->redirect('peer_reviews.php');
 }
 
 $conn = $db->getConnection();
 
-// Fetch review details: either user is the reviewer, OR user is the author of the submission being reviewed
-$stmt = $conn->prepare("SELECT pr.*, 
+// Fetch review details: either user is the reviewer, OR user is the author of the submission being reviewed.
+//
+// The submission author's name is deliberately NOT selected. Blind review means
+// a reviewer must not be able to see whose work they are judging, and the
+// simplest way to guarantee that is never to load the identity in the first
+// place. review_author_label() supplies "Anonymous classmate" for anyone who
+// is not the author or an instructor.
+$stmt = $conn->prepare("SELECT pr.*,
                                s.submission_id, s.student_id, s.submission_text, s.file_path, s.file_name, s.submission_date,
                                a.assignment_id, a.title as assignment_title, a.max_points, a.description as assignment_description,
                                c.course_id, c.title as course_title,
-                               author.first_name as author_first_name, author.last_name as author_last_name,
                                reviewer.first_name as reviewer_first_name, reviewer.last_name as reviewer_last_name
                         FROM peer_reviews pr
                         JOIN submissions s ON pr.submission_id = s.submission_id
                         JOIN assignments a ON s.assignment_id = a.assignment_id
                         JOIN modules m ON a.module_id = m.module_id
                         JOIN courses c ON m.course_id = c.course_id
-                        JOIN users author ON s.student_id = author.user_id
                         JOIN users reviewer ON pr.reviewer_id = reviewer.user_id
                         WHERE pr.review_id = ?");
 $stmt->execute([$review_id]);
 $review = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if(!$review) {
-    $_SESSION['error'] = "Review not found.";
+    flash_error("Review not found.");
     $auth->redirect('peer_reviews.php');
 }
 
@@ -41,7 +47,7 @@ $is_reviewer = ($review['reviewer_id'] == $_SESSION['user_id']);
 $is_author = ($review['student_id'] == $_SESSION['user_id']);
 
 if(!$is_reviewer && !$is_author) {
-    $_SESSION['error'] = "You are not authorized to view this review.";
+    flash_error("You are not authorized to view this review.");
     $auth->redirect('peer_reviews.php');
 }
 
@@ -196,7 +202,10 @@ require_once '../includes/header.php';
                     <li class="mb-3">
                         <small class="text-muted d-block">Reviewed Submission Author</small>
                         <?php if($is_reviewer): ?>
-                            <strong><?php echo htmlspecialchars($review['author_first_name'] . ' ' . $review['author_last_name']); ?></strong>
+                            <?php // Blind review: a reviewer must not learn whose work they judged. ?>
+                            <strong class="text-primary">
+                                <i class="fas fa-user-secret me-1" aria-hidden="true"></i>Anonymous classmate
+                            </strong>
                         <?php else: ?>
                             <strong class="text-primary">You (Your Submission)</strong>
                         <?php endif; ?>
@@ -207,10 +216,10 @@ require_once '../includes/header.php';
                         <?php if($is_reviewer): ?>
                             <strong class="text-primary">You (Self)</strong>
                         <?php else: ?>
-                            <?php if($review['is_anonymous']): ?>
-                                <span class="badge bg-secondary"><i class="fas fa-user-secret me-1"></i> Anonymous Peer</span>
+                            <?php if(!empty($review['is_anonymous'])): ?>
+                                <span class="badge badge-soft-neutral"><i class="fas fa-user-secret" aria-hidden="true"></i> Anonymous peer</span>
                             <?php else: ?>
-                                <strong><?php echo htmlspecialchars($review['reviewer_first_name'] . ' ' . $review['reviewer_last_name']); ?></strong>
+                                <strong><?php echo e($review['reviewer_first_name'] . ' ' . $review['reviewer_last_name']); ?></strong>
                             <?php endif; ?>
                         <?php endif; ?>
                     </li>
