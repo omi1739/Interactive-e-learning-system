@@ -13,9 +13,19 @@ $submission_id = intval($_GET['id'] ?? 0);
 $db = new Database();
 $conn = $db->getConnection();
 
-// Get submission details with assignment and student info
-$stmt = $conn->prepare("SELECT s.*, a.*, u.first_name, u.last_name, u.username, u.email,
-                       m.title as module_title, c.title as course_title, c.course_id, c.instructor_id
+// Get submission details with assignment and student info.
+// Columns are listed explicitly rather than with `s.*, a.*`: submissions and
+// assignments both define assignment_id, created_at and updated_at, and with a
+// wildcard the duplicate names are resolved silently by column order, so the
+// page would report the assignment's timestamps as the submission's.
+$stmt = $conn->prepare("SELECT s.submission_id, s.assignment_id, s.student_id,
+                               s.submission_text, s.file_path, s.file_name,
+                               s.status AS submission_status, s.final_grade, s.instructor_feedback,
+                               s.submission_date, s.updated_at AS submission_updated_at,
+                               a.title, a.description AS assignment_description, a.max_points,
+                               a.due_date, a.submission_format, a.is_published,
+                               u.first_name, u.last_name, u.username, u.email,
+                               m.title as module_title, c.title as course_title, c.course_id, c.instructor_id
                        FROM submissions s
                        JOIN assignments a ON s.assignment_id = a.assignment_id
                        JOIN users u ON s.student_id = u.user_id
@@ -53,10 +63,10 @@ $success = $_SESSION['success'] ?? '';
 $error = $_SESSION['error'] ?? '';
 unset($_SESSION['success'], $_SESSION['error']);
 
-// Get peer reviews for this submission with rubric score details
-$stmt = $conn->prepare("SELECT pr.*, u.first_name, u.last_name, u.username,
-                               (SELECT AVG(rs.score) FROM review_scores rs WHERE rs.review_id = pr.review_id) as avg_score,
-                               (SELECT SUM(rs.score) FROM review_scores rs WHERE rs.review_id = pr.review_id) as total_rubric_score
+// Get peer reviews for this submission.
+// The score columns were AVG/SUM over individual criterion marks, which is not
+// a score out of the rubric and was never displayed here, so they are gone.
+$stmt = $conn->prepare("SELECT pr.*, u.first_name, u.last_name, u.username
                         FROM peer_reviews pr
                         JOIN users u ON pr.reviewer_id = u.user_id
                         WHERE pr.submission_id = ?
@@ -102,8 +112,9 @@ require_once '../includes/header.php';
                     <p><strong>Name:</strong> <?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></p>
                     <p><strong>Email:</strong> <?php echo htmlspecialchars($submission['email']); ?></p>
                     <p><strong>Submitted:</strong> <?php echo date('M j, Y g:i A', strtotime($submission['submission_date'])); ?></p>
+                    <p><strong>Status:</strong> <?php echo ui_status_badge($submission['submission_status'] ?? 'submitted'); ?></p>
                     <?php if($submission['due_date'] && strtotime($submission['submission_date']) > strtotime($submission['due_date'])): ?>
-                        <p><strong class="text-danger">Status: Late Submission</strong></p>
+                        <p class="mb-0"><span class="badge badge-soft-danger"><i class="fas fa-clock" aria-hidden="true"></i> Late submission</span></p>
                     <?php endif; ?>
                 </div>
 
@@ -119,7 +130,8 @@ require_once '../includes/header.php';
                 <?php if($submission['file_path']): ?>
                 <div class="mb-4">
                     <h6>Submitted File</h6>
-                    <a href="download.php?submission_id=<?php echo (int)$submission['submission_id']; ?>" class="btn btn-outline-primary">
+                    <?php // download.php lives at the app root, one level up from /instructor/. ?>
+                    <a href="<?php echo e_attr(app_url('download.php') . '?submission_id=' . (int) $submission['submission_id']); ?>" class="btn btn-outline-primary">
                         <i class="fas fa-download"></i> Download File: <?php echo htmlspecialchars($submission['file_name']); ?>
                     </a>
                 </div>

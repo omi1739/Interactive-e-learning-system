@@ -26,13 +26,8 @@ if(!$assignment || $assignment['instructor_id'] != $_SESSION['user_id']) {
     $auth->redirect('assignments.php');
 }
 
-// Get enhanced submissions data with peer review analytics
-$stmt = $conn->prepare("SELECT s.*, u.first_name, u.last_name, u.username, u.email,
-                       (SELECT COUNT(*) FROM peer_reviews pr WHERE pr.submission_id = s.submission_id) as total_reviews,
-                       (SELECT COUNT(*) FROM peer_reviews pr WHERE pr.submission_id = s.submission_id AND pr.status = 'completed') as completed_reviews,
-                       (SELECT AVG(rs.score) FROM peer_reviews pr 
-                        JOIN review_scores rs ON pr.review_id = rs.review_id 
-                        WHERE pr.submission_id = s.submission_id AND pr.status = 'completed') as avg_peer_score
+// Get submissions for this assignment.
+$stmt = $conn->prepare("SELECT s.*, u.first_name, u.last_name, u.username, u.email
                        FROM submissions s
                        JOIN users u ON s.student_id = u.user_id
                        WHERE s.assignment_id = ?
@@ -40,37 +35,239 @@ $stmt = $conn->prepare("SELECT s.*, u.first_name, u.last_name, u.username, u.ema
 $stmt->execute([$assignment_id]);
 $submissions = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Index by id so handlers and the view can look a submission up in O(1).
+$submissions_by_id = [];
+foreach($submissions as $row) {
+    $submissions_by_id[(int)$row['submission_id']] = $row;
+}
+
+// The rubric total is what a peer review is scored out of. Comparing an average
+// score against the assignment's max_points only worked if the rubric happened
+// to sum to exactly that number.
+$rubric_stmt = $conn->prepare("SELECT COALESCE(SUM(max_score), 0) FROM rubrics WHERE assignment_id = ?");
+$rubric_stmt->execute([$assignment_id]);
+$rubric_total = (float)$rubric_stmt->fetchColumn();
+
+// Every peer review on this assignment, fetched once for the whole page.
+//
+// The previous version ran a query per row from inside the table body, and
+// derived the displayed score with AVG(score) over review_scores. That averages
+// the individual criterion marks, so a review of four criteria out of 25 and a
+// review of one criterion out of 25 were treated as comparable. Summing per
+// review first, then averaging those totals, is what the number claims to be.
+$reviews_by_submission = [];
+if(!empty($submissions)) {
+    $review_stmt = $conn->prepare("SELECT pr.review_id, pr.submission_id, pr.reviewer_id, pr.status,
+                                          pr.is_anonymous, pr.overall_feedback, pr.review_date,
+                                          u.first_name, u.last_name,
+                                          (SELECT SUM(rs.score) FROM review_scores rs WHERE rs.review_id = pr.review_id) AS total_score
+                                   FROM peer_reviews pr
+                                   JOIN users u ON pr.reviewer_id = u.user_id
+                                   WHERE pr.submission_id IN (" . implode(',', array_fill(0, count($submissions), '?')) . ")
+                                   ORDER BY pr.status DESC, pr.review_date DESC");
+    $review_stmt->execute(array_map(static fn($s) => (int)$s['submission_id'], $submissions));
+
+    foreach($review_stmt->fetchAll(PDO::FETCH_ASSOC) as $review) {
+        $reviews_by_submission[(int)$review['submission_id']][] = $review;
+    }
+}
+
+// Roll the per-review totals up to the submission, and fill in the counters
+// the table reads. Doing it here keeps one query and one definition of "score".
+foreach($submissions as &$submission) {
+    $sid = (int)$submission['submission_id'];
+    $reviews = $reviews_by_submission[$sid] ?? [];
+
+    $completed = array_values(array_filter(
+        $reviews,
+        static fn($r) => $r['status'] === 'completed' && $r['total_score'] !== null
+    ));
+
+    $totals = array_map(static fn($r) => (float)$r['total_score'], $completed);
+
+    $submission['total_reviews'] = count($reviews);
+    $submission['completed_reviews'] = count($completed);
+    $submission['avg_peer_score'] = !empty($totals)
+        ? array_sum($totals) / count($totals)
+        : null;
+}
+unset($submission);
+
+/**
+ * Assign peer reviewers to one submission.
+ *
+ * $assignment_id is passed in because the caller has already proven ownership
+ * of it; re-deriving it here cost an extra query per row during bulk actions.
+ * Reviewers are drawn from students who submitted to the same assignment,
+ * never the author, and an existing pair is never duplicated.
+ */
+function assignReviewsToSubmission(PDO $conn, int $assignment_id, int $submission_id, int $author_id, int $reviews_count): int {
+    $stmt = $conn->prepare("SELECT DISTINCT u.user_id
+                            FROM users u
+                            JOIN submissions s ON u.user_id = s.student_id
+                            WHERE s.assignment_id = ? AND s.student_id <> ?");
+    $stmt->execute([$assignment_id, $author_id]);
+    $potential_reviewers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+    if(empty($potential_reviewers)) {
+        return 0;
+    }
+
+    shuffle($potential_reviewers);
+
+    // Skip reviewers who already have a review for this submission, so
+    // re-running the action tops up to the target instead of erroring.
+    $existing_stmt = $conn->prepare("SELECT reviewer_id FROM peer_reviews WHERE submission_id = ?");
+    $existing_stmt->execute([$submission_id]);
+    $existing = array_map('intval', $existing_stmt->fetchAll(PDO::FETCH_COLUMN));
+
+    $assigned = 0;
+    $insert = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status) VALUES (?, ?, 'in_progress')");
+    foreach($potential_reviewers as $reviewer_id) {
+        if($assigned >= $reviews_count) {
+            break;
+        }
+        $reviewer_id = (int)$reviewer_id;
+        if(in_array($reviewer_id, $existing, true)) {
+            continue;
+        }
+        if($insert->execute([$submission_id, $reviewer_id])) {
+            $existing[] = $reviewer_id;
+            $assigned++;
+        }
+    }
+
+    return $assigned;
+}
+
+/**
+ * Confirm a submission id belongs to the assignment this page is scoped to.
+ * Every write action below funnels through this, so a crafted form cannot
+ * reach another instructor's course.
+ */
+function submission_belongs_to_assignment(PDO $conn, int $submission_id, int $assignment_id): ?array {
+    if($submission_id <= 0 || $assignment_id <= 0) {
+        return null;
+    }
+    $stmt = $conn->prepare("SELECT submission_id, student_id, file_path FROM submissions
+                            WHERE submission_id = ? AND assignment_id = ?");
+    $stmt->execute([$submission_id, $assignment_id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
 // Handle grade submission
 if($_POST && isset($_POST['update_grade'])) {
     verify_csrf();
     $submission_id = intval($_POST['submission_id'] ?? 0);
-    $grade = $_POST['grade'];
-    $feedback = trim($_POST['feedback']);
+    $grade = $_POST['grade'] ?? '';
+    $feedback = trim($_POST['feedback'] ?? '');
 
-    // The page already proves we own the assignment, but the submission id
-    // arrives from the form. Verify it belongs to THIS assignment, otherwise
-    // an instructor could grade a submission in another course by guessing ids.
-    $owns_submission = false;
-    if($submission_id > 0) {
-        $check = $conn->prepare("SELECT submission_id FROM submissions WHERE submission_id = ? AND assignment_id = ?");
-        $check->execute([$submission_id, $assignment_id]);
-        $owns_submission = (bool)$check->fetch();
-    }
+    $target = submission_belongs_to_assignment($conn, $submission_id, $assignment_id);
 
-    if(!$owns_submission) {
+    if(!$target) {
         $error = "That submission does not belong to this assignment.";
     } elseif(!is_numeric($grade) || $grade < 0 || $grade > $assignment['max_points']) {
-        $error = "Grade must be a number between 0 and " . $assignment['max_points'];
+        $error = "Grade must be a number between 0 and " . ui_num($assignment['max_points']);
     } else {
         $stmt = $conn->prepare("UPDATE submissions SET final_grade = ?, instructor_feedback = ?, status = 'graded' WHERE submission_id = ? AND assignment_id = ?");
         if($stmt->execute([$grade, $feedback, $submission_id, $assignment_id])) {
-            $_SESSION['success'] = "Grade updated successfully!";
+            flash_success("Grade updated for " . $submissions_by_id[$submission_id]['first_name'] . " " . $submissions_by_id[$submission_id]['last_name'] . ".");
             header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
             exit();
         } else {
             $error = "Failed to update grade.";
         }
     }
+}
+
+// Assign peer reviews to a single submission from the row menu.
+// POST + CSRF: a GET link would let any page the instructor visits trigger it.
+if($_POST && isset($_POST['assign_reviews_single'])) {
+    verify_csrf();
+    $submission_id = intval($_POST['submission_id'] ?? 0);
+    $target = submission_belongs_to_assignment($conn, $submission_id, $assignment_id);
+
+    if(!$target) {
+        flash_error("That submission does not belong to this assignment.");
+    } else {
+        $made = assignReviewsToSubmission($conn, $assignment_id, $submission_id, (int)$target['student_id'], 2);
+        if($made > 0) {
+            flash_success("Assigned {$made} peer review(s).");
+        } else {
+            flash_error("Could not assign more reviewers. Every eligible classmate already has a review for this submission, or nobody else has submitted yet.");
+        }
+    }
+    header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
+    exit();
+}
+
+// Delete a submission, with the review records and stored file that hang off it.
+if($_POST && isset($_POST['delete_submission'])) {
+    verify_csrf();
+    $submission_id = intval($_POST['submission_id'] ?? 0);
+    $target = submission_belongs_to_assignment($conn, $submission_id, $assignment_id);
+
+    if(!$target) {
+        flash_error("That submission does not belong to this assignment.");
+    } else {
+        try {
+            $conn->beginTransaction();
+
+            // Remove the per-review rubric scores before the reviews themselves.
+            $review_ids_stmt = $conn->prepare("SELECT review_id FROM peer_reviews WHERE submission_id = ?");
+            $review_ids_stmt->execute([$submission_id]);
+            $review_ids = array_map('intval', $review_ids_stmt->fetchAll(PDO::FETCH_COLUMN));
+
+            if(!empty($review_ids)) {
+                $ph = implode(',', array_fill(0, count($review_ids), '?'));
+                $del_scores = $conn->prepare("DELETE FROM review_scores WHERE review_id IN ($ph)");
+                $del_scores->execute($review_ids);
+
+                $del_reviews = $conn->prepare("DELETE FROM peer_reviews WHERE submission_id = ?");
+                $del_reviews->execute([$submission_id]);
+            }
+
+            $del_submission = $conn->prepare("DELETE FROM submissions WHERE submission_id = ? AND assignment_id = ?");
+            $del_submission->execute([$submission_id, $assignment_id]);
+
+            if($del_submission->rowCount() === 0) {
+                throw new RuntimeException('Submission was not deleted.');
+            }
+
+            $conn->commit();
+
+            // Only unlink the upload once the row is really gone. The file must
+            // be resolved against UPLOAD_DIR: it is uploads/assignments/ by
+            // default and an arbitrary outside-the-web-root path in production.
+            // The old code rebuilt __DIR__ . '/../uploads/' instead, so in the
+            // default layout it pointed one directory too high (orphaning every
+            // deleted upload) and with UPLOAD_DIR_LOCAL set it targeted a path
+            // unrelated to the real file.
+            if(!empty($target['file_path'])) {
+                $base = realpath(rtrim(UPLOAD_DIR, '/'));
+                $file = $base ? $base . DIRECTORY_SEPARATOR . basename($target['file_path']) : null;
+                if($file !== null && is_file($file) && str_starts_with($file, $base . DIRECTORY_SEPARATOR)) {
+                    if(!@unlink($file)) {
+                        // The row is already gone, so this is only a leftover
+                        // file on disk. Log it instead of failing silently.
+                        error_log('Submission ' . (int)$target['submission_id']
+                            . ' deleted but its upload could not be removed: ' . $file);
+                    }
+                }
+            }
+
+            flash_success("Submission deleted, along with its peer reviews.");
+        } catch(Throwable $e) {
+            if($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+            error_log("Submission delete failed: " . $e->getMessage());
+            flash_error("Could not delete the submission. Nothing was removed.");
+        }
+    }
+    header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
+    exit();
 }
 
 // Handle bulk actions
@@ -99,30 +296,62 @@ if($_POST && isset($_POST['bulk_action'])) {
     if(empty($selected_submissions)) {
         $error = "No valid submissions selected for bulk action.";
     } else {
-        $placeholders = str_repeat('?,', count($selected_submissions) - 1) . '?';
-        
         switch($action) {
             case 'assign_reviews':
                 $assignments_made = 0;
                 foreach($selected_submissions as $submission_id) {
-                    // Assign 2 reviews per selected submission
-                    $result = assignReviewsToSubmission($submission_id, 2, $conn);
-                    $assignments_made += $result;
+                    $row = $submissions_by_id[$submission_id] ?? null;
+                    if(!$row) {
+                        continue;
+                    }
+                    $assignments_made += assignReviewsToSubmission(
+                        $conn,
+                        $assignment_id,
+                        $submission_id,
+                        (int)$row['student_id'],
+                        2
+                    );
                 }
-                $_SESSION['success'] = "Assigned peer reviews to {$assignments_made} submissions.";
+                if($assignments_made > 0) {
+                    $_SESSION['success'] = "Assigned {$assignments_made} peer review(s) across the selected submissions.";
+                } else {
+                    // The old code always claimed success, even when every
+                    // eligible classmate already had a review and nothing happened.
+                    $_SESSION['error'] = "No new reviews were assigned. Every eligible classmate already has a review, or nobody else has submitted to this assignment yet.";
+                }
                 break;
-                
+
             case 'publish_grades':
-                $stmt = $conn->prepare("UPDATE submissions SET status = 'graded' WHERE submission_id IN ($placeholders)");
-                $stmt->execute($selected_submissions);
-                $_SESSION['success'] = "Published grades for " . count($selected_submissions) . " submissions.";
+                // Only release grades that actually exist. The previous
+                // version flipped every selected row to 'graded', which told
+                // students their work had been marked when it had not.
+                $ph = implode(',', array_fill(0, count($selected_submissions), '?'));
+                $stmt = $conn->prepare("UPDATE submissions
+                                        SET status = 'graded'
+                                        WHERE assignment_id = ?
+                                          AND submission_id IN ($ph)
+                                          AND final_grade IS NOT NULL
+                                          AND status <> 'graded'");
+                $stmt->execute(array_merge([$assignment_id], $selected_submissions));
+                $published = $stmt->rowCount();
+
+                $skipped = count($selected_submissions) - $published;
+                if($published > 0) {
+                    $_SESSION['success'] = "Published {$published} grade(s).";
+                } else {
+                    $_SESSION['error'] = "No grades were published. Every selected submission is either already graded or has no grade recorded yet.";
+                }
+                if($skipped > 0) {
+                    $_SESSION['success'] = ($_SESSION['success'] ?? '') . " {$skipped} left unchanged because they had no grade yet.";
+                    $_SESSION['success'] = trim($_SESSION['success']);
+                }
                 break;
-                
-            case 'send_reminders':
-                $_SESSION['success'] = "Reminders sent to " . count($selected_submissions) . " students.";
+
+            default:
+                $_SESSION['error'] = "Unknown bulk action.";
                 break;
         }
-        
+
         header("Location: assignment_submissions.php?id=" . (int)$assignment_id);
         exit();
     }
@@ -153,42 +382,6 @@ if($graded_submissions > 0) {
 }
 
 require_once '../includes/header.php';
-
-// Helper function to assign reviews to a submission
-function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
-    // Get the submission details
-    $stmt = $conn->prepare("SELECT s.*, a.assignment_id FROM submissions s JOIN assignments a ON s.assignment_id = a.assignment_id WHERE s.submission_id = ?");
-    $stmt->execute([$submission_id]);
-    $submission = $stmt->fetch(PDO::FETCH_ASSOC);
-    
-    // Get other students who submitted to the same assignment (excluding the author)
-    $stmt = $conn->prepare("SELECT DISTINCT u.user_id 
-                           FROM users u 
-                           JOIN submissions s ON u.user_id = s.student_id 
-                           WHERE s.assignment_id = ? AND s.student_id != ?");
-    $stmt->execute([$submission['assignment_id'], $submission['student_id']]);
-    $potential_reviewers = $stmt->fetchAll(PDO::FETCH_COLUMN);
-    
-    // Shuffle and select reviewers
-    shuffle($potential_reviewers);
-    $selected_reviewers = array_slice($potential_reviewers, 0, $reviews_count);
-    
-    $assignments_made = 0;
-    foreach($selected_reviewers as $reviewer_id) {
-        // Check if review already exists
-        $check_stmt = $conn->prepare("SELECT * FROM peer_reviews WHERE submission_id = ? AND reviewer_id = ?");
-        $check_stmt->execute([$submission_id, $reviewer_id]);
-        
-        if($check_stmt->rowCount() == 0) {
-            $stmt = $conn->prepare("INSERT INTO peer_reviews (submission_id, reviewer_id, status) VALUES (?, ?, 'in_progress')");
-            if($stmt->execute([$submission_id, $reviewer_id])) {
-                $assignments_made++;
-            }
-        }
-    }
-    
-    return $assignments_made;
-}
 ?>
 
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
@@ -287,20 +480,27 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
                 <small class="text-muted">Course: <?php echo htmlspecialchars($assignment['course_title']); ?></small>
             </h5>
             <div>
-                <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#bulkActionsModal">
-                    <i class="fas fa-tasks"></i> Bulk Actions
-                </button>
+                <?php if(count($submissions) > 0): ?>
+                    <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#bulkActionsModal">
+                        <i class="fas fa-tasks"></i> Bulk Actions
+                    </button>
+                <?php endif; ?>
             </div>
         </div>
     </div>
     <div class="card-body">
         <?php if(count($submissions) > 0): ?>
+            <div class="mb-3">
+                <label for="submissionSearch" class="form-label small fw-semibold text-muted">Filter submissions</label>
+                <input type="search" id="submissionSearch" class="form-control" data-table-search="#submissionsTable"
+                       placeholder="Search by student name or email&hellip;" autocomplete="off">
+            </div>
             <div class="table-responsive">
-                <table class="table table-striped" id="submissionsTable">
+                <table class="table table-striped align-middle" id="submissionsTable">
                     <thead>
                         <tr>
                             <th width="30">
-                                <input type="checkbox" id="selectAll">
+                                <input type="checkbox" id="selectAll" data-select-all=".submission-checkbox">
                             </th>
                             <th>Student</th>
                             <th>Submitted</th>
@@ -313,195 +513,107 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
                     </thead>
                     <tbody>
                         <?php foreach($submissions as $submission): ?>
+                        <?php
+                        $sid = (int)$submission['submission_id'];
+                        $row_reviews = $reviews_by_submission[$sid] ?? [];
+                        $row_name = $submission['first_name'] . ' ' . $submission['last_name'];
+                        ?>
                         <tr>
                             <td>
-                                <input type="checkbox" name="selected_submissions[]" value="<?php echo $submission['submission_id']; ?>" class="submission-checkbox">
+                                <?php // form="bulkForm" associates this box with the form in the
+                                      // modal below. The two cannot be nested, and without
+                                      // this the browser submits no boxes at all. ?>
+                                <input type="checkbox" name="selected_submissions[]" value="<?php echo $sid; ?>"
+                                       class="submission-checkbox" form="bulkForm">
                             </td>
-                            <td>
-                                <strong><?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></strong>
-                                <br><small class="text-muted"><?php echo htmlspecialchars($submission['email']); ?></small>
+                            <td class="min-w-0">
+                                <strong><?php echo e($row_name); ?></strong>
+                                <br><small class="text-muted"><?php echo e($submission['email']); ?></small>
                             </td>
-                            <td>
-                                <?php echo date('M j, Y g:i A', strtotime($submission['submission_date'])); ?>
-                                <?php if($assignment['due_date'] && strtotime($submission['submission_date']) > strtotime($assignment['due_date'])): ?>
-                                    <br><span class="badge bg-danger">Late</span>
+                            <td class="text-nowrap">
+                                <?php echo ui_date($submission['submission_date'], 'M j, Y g:i A'); ?>
+                                <?php if(ui_is_late($submission['submission_date'], $assignment['due_date'])): ?>
+                                    <br><span class="badge badge-soft-danger"><i class="fas fa-clock" aria-hidden="true"></i> Late</span>
                                 <?php endif; ?>
                             </td>
+                            <td><?php echo ui_status_badge($submission['status']); ?></td>
                             <td>
-                                <span class="badge bg-<?php 
-                                    switch($submission['status']) {
-                                        case 'graded': echo 'success'; break;
-                                        case 'submitted': echo 'warning'; break;
-                                        case 'draft': echo 'secondary'; break;
-                                        default: echo 'info';
-                                    }
-                                ?>">
-                                    <?php echo ucfirst($submission['status']); ?>
-                                </span>
+                                <?php echo ui_grade_badge($submission['final_grade'], $assignment['max_points']); ?>
                             </td>
                             <td>
-                                <?php if($submission['final_grade'] !== null): ?>
-                                    <strong><?php echo htmlspecialchars($submission['final_grade']); ?>/<?php echo htmlspecialchars($assignment['max_points']); ?></strong>
-                                    <?php 
-                                    $percentage = ($submission['final_grade'] / $assignment['max_points']) * 100;
-                                    if($percentage >= 80): ?>
-                                        <span class="badge bg-success ms-1">A</span>
-                                    <?php elseif($percentage >= 70): ?>
-                                        <span class="badge bg-info ms-1">B</span>
-                                    <?php elseif($percentage >= 60): ?>
-                                        <span class="badge bg-warning ms-1">C</span>
-                                    <?php else: ?>
-                                        <span class="badge bg-danger ms-1">D/F</span>
-                                    <?php endif; ?>
-                                <?php else: ?>
-                                    <span class="text-muted">Not graded</span>
-                                <?php endif; ?>
+                                <?php
+                                $total_reviews = (int)$submission['total_reviews'];
+                                $completed_reviews = (int)$submission['completed_reviews'];
+                                ?>
+                    <span class="badge <?php echo $completed_reviews > 0 ? 'badge-soft-info' : 'badge-soft-neutral'; ?>">
+                        <?php echo $completed_reviews; ?>/<?php echo $total_reviews; ?>
+                    </span>
                             </td>
                             <td>
-                                <span class="badge bg-<?php echo $submission['completed_reviews'] > 0 ? 'info' : 'secondary'; ?>">
-                                    <?php echo $submission['completed_reviews']; ?>/<?php echo $submission['total_reviews']; ?> completed
-                                </span>
-                            </td>
-                            <td>
-                                <?php if($submission['avg_peer_score'] !== null): ?>
-                                    <span class="badge bg-<?php echo $submission['avg_peer_score'] >= ($assignment['max_points'] * 0.7) ? 'success' : 'warning'; ?>">
-                                        <?php echo number_format($submission['avg_peer_score'], 1); ?>
+                                <?php
+                                // Score the average against the rubric total,
+                                // not against the assignment's max_points.
+                                if($submission['avg_peer_score'] !== null && $rubric_total > 0):
+                                    $peer_pct = ((float)$submission['avg_peer_score'] / $rubric_total) * 100;
+                                    ?>
+                                    <span class="badge <?php echo $peer_pct >= 70 ? 'badge-soft-success' : 'badge-soft-warning'; ?>"
+                                          title="<?php echo e(ui_num($submission['avg_peer_score'], 2) . ' of ' . ui_num($rubric_total, 2) . ' rubric points'); ?>">
+                                        <?php echo ui_num($peer_pct, 0); ?>%
                                     </span>
                                 <?php else: ?>
-                                    <span class="text-muted">-</span>
+                                    <span class="text-muted">&mdash;</span>
                                 <?php endif; ?>
                             </td>
                             <td>
                                 <div class="btn-group btn-group-sm" role="group">
-                                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#gradeModal<?php echo $submission['submission_id']; ?>">
+                                    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#gradeModal"
+                                            data-submission-id="<?php echo $sid; ?>"
+                                            data-student-name="<?php echo e_attr($row_name); ?>"
+                                            data-grade="<?php echo e_attr($submission['final_grade'] ?? ''); ?>"
+                                            data-feedback="<?php echo e_attr($submission['instructor_feedback'] ?? ''); ?>"
+                                            data-peer-score="<?php echo e_attr($submission['avg_peer_score'] === null ? '' : ui_num($submission['avg_peer_score'], 2)); ?>">
                                         <i class="fas fa-edit"></i> Grade
                                     </button>
-                                    <a href="submission_view.php?id=<?php echo $submission['submission_id']; ?>" class="btn btn-info">
+                                    <a href="submission_view.php?id=<?php echo $sid; ?>" class="btn btn-info">
                                         <i class="fas fa-eye"></i> View
                                     </a>
-                                    <button class="btn btn-outline-secondary" data-bs-toggle="dropdown">
+                                    <button type="button" class="btn btn-outline-secondary" data-bs-toggle="dropdown" aria-expanded="false">
                                         <i class="fas fa-ellipsis-v"></i>
+                                        <span class="visually-hidden">More actions</span>
                                     </button>
-                                    <ul class="dropdown-menu">
-                                        <li><a class="dropdown-item" href="#" onclick="assignSingleReview(<?php echo $submission['submission_id']; ?>)">
-                                            <i class="fas fa-user-plus"></i> Assign Review
-                                        </a></li>
-                                        <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#peerReviewsModal<?php echo $submission['submission_id']; ?>">
-                                            <i class="fas fa-comments"></i> View Peer Reviews
-                                        </a></li>
+                                    <ul class="dropdown-menu dropdown-menu-end">
+                                        <li>
+                                            <form method="POST" class="d-block">
+                                                <?php echo csrf_field(); ?>
+                                                <input type="hidden" name="submission_id" value="<?php echo $sid; ?>">
+                                                <button type="submit" name="assign_reviews_single" value="1" class="dropdown-item">
+                                                    <i class="fas fa-user-plus"></i> Assign Peer Reviews
+                                                </button>
+                                            </form>
+                                        </li>
+                                        <li>
+                                            <button type="button" class="dropdown-item"
+                                                    data-bs-toggle="modal" data-bs-target="#peerReviewsModal"
+                                                    data-student-name="<?php echo e_attr($row_name); ?>"
+                                                    data-reviews="<?php echo e_attr(json_encode($row_reviews, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP)); ?>">
+                                                <i class="fas fa-comments"></i> View Peer Reviews
+                                            </button>
+                                        </li>
                                         <li><hr class="dropdown-divider"></li>
-                                        <li><a class="dropdown-item text-danger" href="#" onclick="return confirm('Are you sure you want to delete this submission?')">
-                                            <i class="fas fa-trash"></i> Delete
-                                        </a></li>
+                                        <li>
+                                            <form method="POST" class="d-block"
+                                                  data-confirm="Delete this submission? Its peer reviews will be removed too. This cannot be undone.">
+                                                <?php echo csrf_field(); ?>
+                                                <input type="hidden" name="submission_id" value="<?php echo $sid; ?>">
+                                                <button type="submit" name="delete_submission" value="1" class="dropdown-item text-danger">
+                                                    <i class="fas fa-trash"></i> Delete
+                                                </button>
+                                            </form>
+                                        </li>
                                     </ul>
                                 </div>
                             </td>
                         </tr>
-
-                        <!-- Grade Modal for each submission -->
-                        <div class="modal fade" id="gradeModal<?php echo $submission['submission_id']; ?>" tabindex="-1">
-                            <div class="modal-dialog modal-lg">
-                                <div class="modal-content">
-                                    <div class="modal-header">
-                                        <h5 class="modal-title">Grade Submission</h5>
-                                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                                    </div>
-                                    <form method="POST">
-                                        <?php echo csrf_field(); ?>
-                                        <div class="modal-body">
-                                            <div class="row mb-3">
-                                                <div class="col-md-6">
-                                                    <p><strong>Student:</strong> <?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></p>
-                                                    <p><strong>Assignment:</strong> <?php echo htmlspecialchars($assignment['title']); ?></p>
-                                                </div>
-                                                <div class="col-md-6">
-                                                    <p><strong>Submitted:</strong> <?php echo date('M j, Y g:i A', strtotime($submission['submission_date'])); ?></p>
-                                                    <?php if($submission['avg_peer_score'] !== null): ?>
-                                                        <p><strong>Avg Peer Score:</strong> <?php echo number_format($submission['avg_peer_score'], 1); ?>/<?php echo $assignment['max_points']; ?></p>
-                                                    <?php endif; ?>
-                                                </div>
-                                            </div>
-                                            
-                                            <div class="mb-3">
-                                                <label for="grade<?php echo $submission['submission_id']; ?>" class="form-label">Final Grade (0 - <?php echo $assignment['max_points']; ?>)</label>
-                                                <input type="number" class="form-control" id="grade<?php echo $submission['submission_id']; ?>" 
-                                                       name="grade" value="<?php echo $submission['final_grade'] ?? ''; ?>" 
-                                                       min="0" max="<?php echo $assignment['max_points']; ?>" step="0.5" required>
-                                            </div>
-                                            
-                                            <div class="mb-3">
-                                                <label for="feedback<?php echo $submission['submission_id']; ?>" class="form-label">Instructor Feedback</label>
-                                                <textarea class="form-control" id="feedback<?php echo $submission['submission_id']; ?>" 
-                                                          name="feedback" rows="4" placeholder="Provide detailed feedback for the student..."><?php echo htmlspecialchars($submission['instructor_feedback'] ?? ''); ?></textarea>
-                                            </div>
-                                        </div>
-                                        <div class="modal-footer">
-                                            <input type="hidden" name="submission_id" value="<?php echo $submission['submission_id']; ?>">
-                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                            <button type="submit" name="update_grade" class="btn btn-primary">Save Grade</button>
-                                        </div>
-                                    </form>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Peer Reviews Modal -->
-                        <div class="modal fade" id="peerReviewsModal<?php echo $submission['submission_id']; ?>" tabindex="-1">
-                            <div class="modal-dialog modal-lg">
-                                <div class="modal-content">
-                                    <div class="modal-header">
-                                        <h5 class="modal-title">Peer Reviews for <?php echo htmlspecialchars($submission['first_name'] . ' ' . $submission['last_name']); ?></h5>
-                                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                                    </div>
-                                    <div class="modal-body">
-                                        <?php
-                                        $review_stmt = $conn->prepare("SELECT pr.*, u.first_name, u.last_name, u.username,
-                                                                      (SELECT AVG(score) FROM review_scores WHERE review_id = pr.review_id) as avg_score
-                                                                      FROM peer_reviews pr
-                                                                      JOIN users u ON pr.reviewer_id = u.user_id
-                                                                      WHERE pr.submission_id = ?
-                                                                      ORDER BY pr.status DESC, pr.review_date DESC");
-                                        $review_stmt->execute([$submission['submission_id']]);
-                                        $reviews = $review_stmt->fetchAll(PDO::FETCH_ASSOC);
-                                        ?>
-                                        
-                                        <?php if(count($reviews) > 0): ?>
-                                            <?php foreach($reviews as $review): ?>
-                                            <div class="card mb-3">
-                                                <div class="card-header d-flex justify-content-between align-items-center">
-                                                    <div>
-                                                        <strong><?php echo htmlspecialchars($review['first_name'] . ' ' . $review['last_name']); ?></strong>
-                                                        <?php if($review['is_anonymous']): ?>
-                                                            <span class="badge bg-secondary ms-2">Anonymous</span>
-                                                        <?php endif; ?>
-                                                    </div>
-                                                    <div>
-                                                        <span class="badge bg-<?php echo $review['status'] == 'completed' ? 'success' : 'warning'; ?>">
-                                                            <?php echo ucfirst($review['status']); ?>
-                                                        </span>
-                                                        <?php if($review['avg_score']): ?>
-                                                            <span class="badge bg-info ms-1">Score: <?php echo number_format($review['avg_score'], 1); ?></span>
-                                                        <?php endif; ?>
-                                                    </div>
-                                                </div>
-                                                <div class="card-body">
-                                                    <?php if($review['overall_feedback']): ?>
-                                                        <p><strong>Overall Feedback:</strong></p>
-                                                        <p><?php echo nl2br(htmlspecialchars($review['overall_feedback'])); ?></p>
-                                                    <?php else: ?>
-                                                        <p class="text-muted">No overall feedback provided yet.</p>
-                                                    <?php endif; ?>
-                                                    <small class="text-muted">Reviewed on: <?php echo date('M j, Y g:i A', strtotime($review['review_date'])); ?></small>
-                                                </div>
-                                            </div>
-                                            <?php endforeach; ?>
-                                        <?php else: ?>
-                                            <p class="text-muted">No peer reviews have been completed for this submission yet.</p>
-                                        <?php endif; ?>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
@@ -516,29 +628,98 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
     </div>
 </div>
 
-<!-- Bulk Actions Modal -->
-<div class="modal fade" id="bulkActionsModal" tabindex="-1">
+<!-- Grade Modal: one shared dialog, filled from the clicked row's data attributes. -->
+<div class="modal fade" id="gradeModal" tabindex="-1" aria-labelledby="gradeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="gradeModalLabel">Grade Submission</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" data-bs-dismiss="modal">
+                <?php echo csrf_field(); ?>
+                <div class="modal-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <p class="mb-1"><strong>Student:</strong> <span id="gradeStudentName">&mdash;</span></p>
+                            <p class="mb-0"><strong>Assignment:</strong> <?php echo e($assignment['title']); ?></p>
+                        </div>
+                        <div class="col-md-6">
+                            <p class="mb-1"><strong>Average peer score:</strong>
+                                <span id="gradePeerScore">&mdash;</span>
+                                <?php if($rubric_total > 0): ?>
+                                    <small class="text-muted">of <?php echo ui_num($rubric_total, 2); ?> rubric points</small>
+                                <?php endif; ?>
+                            </p>
+                            <p class="mb-0"><strong>Max points:</strong> <?php echo ui_num($assignment['max_points']); ?></p>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="gradeInput" class="form-label">Final Grade (0 - <?php echo ui_num($assignment['max_points']); ?>)</label>
+                        <input type="number" class="form-control" id="gradeInput" name="grade"
+                               value="" min="0" max="<?php echo e_attr($assignment['max_points']); ?>" step="0.5" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="feedbackInput" class="form-label">Instructor Feedback</label>
+                        <textarea class="form-control" id="feedbackInput" name="feedback" rows="4"
+                                  maxlength="1500" data-counter="#feedbackCount"
+                                  placeholder="Provide detailed feedback for the student..."></textarea>
+                        <div class="form-text"><span id="feedbackCount">0</span> / 1500 characters</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <input type="hidden" name="submission_id" id="gradeSubmissionId" value="">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" name="update_grade" value="1" class="btn btn-primary">Save Grade</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Peer Reviews Modal: one shared dialog, filled from the clicked row. -->
+<div class="modal fade" id="peerReviewsModal" tabindex="-1" aria-labelledby="peerReviewsModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="peerReviewsModalLabel">Peer Reviews</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="peerReviewsBody"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk Actions Modal. The table's checkboxes point at this form with
+     HTML5's form="bulkForm" attribute, because a form cannot wrap the table
+     without swallowing the per-row action forms. -->
+<div class="modal fade" id="bulkActionsModal" tabindex="-1" aria-labelledby="bulkActionsModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Bulk Actions</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <h5 class="modal-title" id="bulkActionsModalLabel">Bulk Actions</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <form method="POST" id="bulkActionsForm">
+            <form method="POST" id="bulkForm">
                 <?php echo csrf_field(); ?>
                 <div class="modal-body">
+                    <p class="text-muted small" id="bulkSelectionCount" data-bulk-count>
+                        No submissions selected.
+                    </p>
                     <div class="mb-3">
                         <label for="bulk_action" class="form-label">Select Action</label>
                         <select class="form-select" id="bulk_action" name="bulk_action" required>
                             <option value="">Choose an action...</option>
                             <option value="assign_reviews">Assign Peer Reviews (2 per submission)</option>
-                            <option value="publish_grades">Publish Grades</option>
-                            <option value="send_reminders">Send Reminders</option>
+                            <option value="publish_grades">Publish existing grades</option>
                         </select>
                     </div>
-                    <div class="alert alert-info">
+                    <div class="alert alert-info mb-0">
                         <i class="fas fa-info-circle"></i>
-                        This action will apply to all selected submissions.
+                        This applies to every selected submission.
+                        <strong>Publish existing grades</strong> only releases submissions that already have a grade recorded.
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -549,57 +730,5 @@ function assignReviewsToSubmission($submission_id, $reviews_count, $conn) {
         </div>
     </div>
 </div>
-
-<script>
-// Select all checkboxes
-document.getElementById('selectAll').addEventListener('change', function() {
-    const checkboxes = document.querySelectorAll('.submission-checkbox');
-    checkboxes.forEach(checkbox => {
-        checkbox.checked = this.checked;
-    });
-});
-
-// Bulk actions form validation
-document.getElementById('bulkActionsForm').addEventListener('submit', function(e) {
-    const selectedCount = document.querySelectorAll('.submission-checkbox:checked').length;
-    if(selectedCount === 0) {
-        e.preventDefault();
-        alert('Please select at least one submission.');
-        return false;
-    }
-});
-
-// Single review assignment
-function assignSingleReview(submissionId) {
-    if(confirm('Assign 2 peer reviews to this submission?')) {
-        // This would typically be an AJAX call
-        window.location.href = `assignment_view.php?id=<?php echo (int)$assignment_id; ?>&assign_single=${submissionId}`;
-    }
-}
-
-// Initialize table sorting and filtering
-document.addEventListener('DOMContentLoaded', function() {
-    // Add search functionality
-    const searchInput = document.createElement('input');
-    searchInput.type = 'text';
-    searchInput.placeholder = 'Search submissions...';
-    searchInput.className = 'form-control mb-3';
-    searchInput.style.maxWidth = '300px';
-    
-    searchInput.addEventListener('input', function() {
-        const filter = this.value.toLowerCase();
-        const rows = document.querySelectorAll('#submissionsTable tbody tr');
-        
-        rows.forEach(row => {
-            const text = row.textContent.toLowerCase();
-            row.style.display = text.includes(filter) ? '' : 'none';
-        });
-    });
-    
-    // Insert search box before the table
-    const table = document.querySelector('.table-responsive');
-    table.parentNode.insertBefore(searchInput, table);
-});
-</script>
 
 <?php require_once '../includes/footer.php'; ?>
