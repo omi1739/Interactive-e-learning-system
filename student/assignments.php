@@ -22,12 +22,6 @@ $stmt = $conn->prepare("SELECT a.*, m.title as module_title, c.title as course_t
 $stmt->execute([$_SESSION['user_id'], $_SESSION['user_id']]);
 $assignments = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Debug: Check what data we're getting
-error_log("Student assignments query returned: " . count($assignments) . " assignments");
-foreach($assignments as $assignment) {
-    error_log("Assignment: {$assignment['title']}, Grade: " . ($assignment['final_grade'] ?? 'NULL') . ", Status: {$assignment['submission_status']}");
-}
-
 require_once '../includes/header.php';
 ?>
 
