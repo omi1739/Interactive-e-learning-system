@@ -22,34 +22,49 @@ if (!is_file($local_config)) {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Configuration Required</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+        <style>
+            /* Self-contained on purpose: this page renders before includes/helpers.php
+               is loaded, so asset_url() does not exist yet, and an error page must stay
+               readable even if the stylesheet fails to load. */
+            :root { color-scheme: light; }
+            * { box-sizing: border-box; }
+            body { margin: 0; padding: 3rem 1rem; min-height: 100vh; display: flex;
+                   align-items: center; justify-content: center;
+                   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+                   background: #f5f6f8; color: #1f2430; line-height: 1.6; }
+            .card { background: #fff; border-radius: 16px; padding: 2rem; max-width: 34rem;
+                    width: 100%; box-shadow: 0 10px 30px rgba(16, 24, 40, .08);
+                    border: 1px solid #e6e8ec; }
+            h3 { margin: 0 0 1rem; font-size: 1.35rem; font-weight: 700; }
+            p { margin: 0 0 1rem; }
+            .muted { color: #6b7280; }
+            .small { font-size: .85rem; }
+            code { background: #eef0f3; padding: .1rem .35rem; border-radius: 5px;
+                   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                   font-size: .9em; }
+            pre { background: #111827; color: #e5e7eb; padding: 1rem; border-radius: 10px;
+                  overflow-x: auto; font-size: .85rem; margin: .5rem 0 0;
+                  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        </style>
     </head>
-    <body class="bg-light">
-        <div class="container py-5">
-            <div class="row justify-content-center">
-                <div class="col-md-8">
-                    <div class="card shadow-sm border-0 rounded-3">
-                        <div class="card-body p-4">
-                            <h3 class="card-title fw-bold mb-3">Configuration Required</h3>
-                            <p class="text-muted">
-                                The application is installed but not configured yet. This page is only
-                                visible until the site owner finishes setup.
-                            </p>
-                            <p>Create the file <code>config/local.php</code> by copying
-                                <code>config/local.example.php</code>, then enter your database
-                                credentials and the cron token.</p>
-                            <p class="mb-0 text-muted small">
-                                Then import the schema and create the first admin account:
-                            </p>
-                            <pre class="bg-dark text-light p-3 rounded small mt-2 mb-0">mysql -u USER -p DATABASE &lt; database/schema-only.sql
+    <body>
+        <div class="card">
+            <h3>Configuration Required</h3>
+            <p class="muted">
+                The application is installed but not configured yet. This page is only
+                visible until the site owner finishes setup.
+            </p>
+            <p>Create the file <code>config/local.php</code> by copying
+                <code>config/local.example.php</code>, then enter your database
+                credentials and the cron token.</p>
+            <p class="mb-0 muted small">
+                Then import the schema and create the first admin account:
+            </p>
+            <pre>mysql -u USER -p DATABASE &lt; database/schema-only.sql
 php install/create_admin.php</pre>
-                            <p class="text-muted small mt-3 mb-0">
-                                See <code>docs/DEPLOY.md</code> for the full checklist.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            <p class="muted small" style="margin-top:1rem">
+                See <code>docs/DEPLOY.md</code> for the full checklist.
+            </p>
         </div>
     </body>
     </html>
@@ -133,22 +148,27 @@ try {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Service Unavailable</title>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+            <style>
+                /* Self-contained for the same reason as the page above: rendered before
+                   includes/helpers.php exists, and a database outage is exactly when the
+                   page has to stay legible. */
+                * { box-sizing: border-box; }
+                body { margin: 0; padding: 3rem 1rem; min-height: 100vh; display: flex;
+                       align-items: center; justify-content: center;
+                       font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+                       background: #f5f6f8; color: #1f2430; line-height: 1.6; }
+                .card { background: #fff; border-radius: 16px; padding: 2.5rem 2rem;
+                        max-width: 30rem; width: 100%; text-align: center;
+                        box-shadow: 0 10px 30px rgba(16, 24, 40, .08);
+                        border: 1px solid #e6e8ec; }
+                h3 { margin: 0 0 .75rem; font-size: 1.3rem; font-weight: 700; }
+                p { margin: 0; color: #6b7280; }
+            </style>
         </head>
-        <body class="bg-light">
-            <div class="container py-5">
-                <div class="row justify-content-center">
-                    <div class="col-md-7">
-                        <div class="card shadow-sm border-0 rounded-3">
-                            <div class="card-body p-4 text-center">
-                                <h3 class="card-title fw-bold">Service Temporarily Unavailable</h3>
-                                <p class="text-muted mb-0">
-                                    The application could not reach its database. Please try again in a few minutes.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+        <body>
+            <div class="card">
+                <h3>Service Temporarily Unavailable</h3>
+                <p>The application could not reach its database. Please try again in a few minutes.</p>
             </div>
         </body>
         </html>

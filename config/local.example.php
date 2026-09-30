@@ -14,6 +14,10 @@
 
 // 'production' hides all PHP errors from visitors and logs them to the log
 // directory below. Use 'development' locally only if you want errors on screen.
+//
+// Note: the APP_ENV environment variable takes precedence over this setting.
+// If your host lets you define environment variables, make sure APP_ENV is not
+// set there, or it will override whatever you choose here.
 define('APP_ENV_LOCAL', 'production');
 
 // Database credentials for your host.
@@ -36,7 +40,13 @@ define('DB_PASS', 'your_database_password');
  *      if writes fail, try 775)
  *   3. Put the absolute paths below
  *
- * The trailing slash is required.
+ * The _LOCAL suffix on these two names is required. includes/bootstrap.php
+ * reads only UPLOAD_DIR_LOCAL and LOG_DIR_LOCAL; writing UPLOAD_DIR or
+ * LOG_DIR here has no effect and leaves uploads and error logs inside the web
+ * root, which is the opposite of what this setting is for.
+ *
+ * Absolute paths. A trailing slash is fine either way - every consumer
+ * rtrim()s the value before joining.
  */
 define('UPLOAD_DIR_LOCAL', '/home/YOURUSER/data/uploads/');
 define('LOG_DIR_LOCAL',    '/home/YOURUSER/data/logs/');

@@ -47,7 +47,7 @@ privileges on that database, and import the schema through phpMyAdmin:
 - **Select your database**
 - **Import** &rarr; upload `database/schema-only.sql` &rarr; **Go**
 
-The file contains only `CREATE TABLE` statements. Confirm that 12 tables appear.
+The file contains only `CREATE TABLE` statements. Confirm that 13 tables appear.
 
 Do **not** import `database/schema.sql` from an old checkout that still contains
 the old seed block - it creates accounts sharing the password `password123`.
@@ -61,7 +61,7 @@ In the hosting panel's file manager, copy `config/local.example.php` to
 
 ```php
 <?php
-define('APP_ENV', 'production');
+define('APP_ENV_LOCAL', 'production');
 define('DB_HOST', 'localhost');
 define('DB_NAME', 'your_database_name');
 define('DB_USER', 'your_database_user');
@@ -70,20 +70,29 @@ define('DB_PASS', 'your_database_password');
 // A long random string, e.g. output of: openssl rand -hex 32
 define('CRON_TOKEN', 'paste-a-long-random-string-here');
 
-// Optional: move these outside the web root (recommended)
-define('UPLOAD_DIR', '/home/YOURUSER/data/uploads');
-define('LOG_DIR',    '/home/YOURUSER/data/logs');
+// Recommended: move these outside the web root
+define('UPLOAD_DIR_LOCAL', '/home/YOURUSER/data/uploads');
+define('LOG_DIR_LOCAL',    '/home/YOURUSER/data/logs');
 ```
 
 Notes:
 
 - `DB_PASS` must be the real password even if it is empty; use `''`.
 - If the database host is not `localhost`, use the host the panel gives you.
-- `UPLOAD_DIR` and `LOG_DIR` must be **absolute** paths ending in the directory
-  name, with no trailing slash.
-- If the panel cannot create directories outside the web root, leave these
-  undefined and the app falls back to `uploads/` and `logs/` inside the root.
-  The `.htaccess` in each still blocks web access.
+- The `_LOCAL` suffix on `APP_ENV_LOCAL`, `UPLOAD_DIR_LOCAL` and `LOG_DIR_LOCAL`
+  is **required**. `includes/bootstrap.php` reads only those names. Writing
+  `UPLOAD_DIR` or `LOG_DIR` here does nothing at all: the app silently falls
+  back to writing uploads and error logs inside the web root, which is exactly
+  what this step exists to prevent.
+- The `APP_ENV` **environment variable** wins over `APP_ENV_LOCAL`. If your host
+  exposes environment variables, make sure `APP_ENV` is not set there, or
+  `'production'` below is ignored and errors may be shown to visitors.
+- `UPLOAD_DIR_LOCAL` and `LOG_DIR_LOCAL` must be **absolute** paths. A trailing
+  slash is fine either way - every consumer `rtrim()`s the value before joining.
+- If the panel cannot create directories outside the web root, leave these two
+  undefined and the app falls back to `uploads/assignments/` and `logs/`
+  inside the root. The `.htaccess` in each still blocks web access, but moving
+  them out is the stronger option.
 
 `config/local.php` is in `.gitignore`, and `config/.htaccess` denies HTTP access
 to it. Double-check by browsing to
@@ -157,11 +166,34 @@ If your host *does* offer real cron, this is better (the token is not in a URL):
 - [ ] `https://YOURDOMAIN/database/schema-only.sql` is **not** downloadable
 - [ ] `https://YOURDOMAIN/logs/` is **not** browsable
 - [ ] `https://YOURDOMAIN/uploads/` is **not** browsable
+- [ ] `config/local.php` uses `APP_ENV_LOCAL`, `UPLOAD_DIR_LOCAL` and
+      `LOG_DIR_LOCAL` (not the un-suffixed names)
 - [ ] A submission file is only downloadable through `download.php`
 - [ ] Registering as a student leaves the enrollment **pending** until an
       instructor approves it
+- [ ] Marking a lesson complete in a course persists across a page reload
 - [ ] The admin account can log in
 - [ ] `config/local.php` has not been committed to Git
+
+Run the two static checks from the project root before you call it done:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\lint.ps1
+php tools/audit.php
+```
+
+---
+
+## 8a. Upgrading a database created before lesson progress
+
+A site deployed from an older checkout has no `lesson_progress` table, and the
+course page will then fail on every load. Import
+`database/migrations/001_lesson_progress.sql` through phpMyAdmin
+(**Select your database** &rarr; **Import**). It contains a single
+`CREATE TABLE IF NOT EXISTS`, so re-running it is harmless.
+
+A fresh import of `database/schema-only.sql` already includes the table and
+needs no migration.
 
 ---
 
@@ -172,12 +204,16 @@ If your host *does* offer real cron, this is better (the token is not in a URL):
 look in the log directory for the underlying PDO error.
 
 **"Upload failed" on every submission.**
-`fileinfo` is not enabled, or `UPLOAD_DIR` is not writable. Verify the
+`fileinfo` is not enabled, or `UPLOAD_DIR_LOCAL` is not writable. Verify the
 extension in phpMyAdmin, then check the directory permissions.
 
 **Uploads work but files 404 when downloaded.**
-`UPLOAD_DIR` does not match the directory the files were actually written to.
-Remember there is no trailing slash.
+`UPLOAD_DIR_LOCAL` does not match the directory the files were actually written
+to. Check the value in `config/local.php`; a trailing slash is not the cause
+either way, since every consumer normalises it.
+
+**"Table 'lesson_progress' doesn't exist".**
+The migration in section 8a has not been applied to this database.
 
 **Cron returns 403.**
 `CRON_TOKEN` is still the placeholder value, or the token in the URL differs

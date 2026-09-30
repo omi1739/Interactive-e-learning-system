@@ -28,7 +28,7 @@ command line.
 mysql -u DB_USER -p DB_NAME < database/schema-only.sql
 ```
 
-`database/schema-only.sql` contains the 12 table definitions and **no seed
+`database/schema-only.sql` contains the 13 table definitions and **no seed
 data**. No demo users, no sample courses, no default passwords.
 
 ### 2. Create the local configuration
@@ -54,16 +54,24 @@ shell/terminal. Use SSH or your hosting control panel's terminal.
 
 ### 4. Make the upload and log directories writable
 
-By default the application writes to `uploads/` and `logs/` inside the web
-root. For a real deployment, put them **outside** the web root and point the
-config at them instead:
+By default the application writes to `uploads/assignments/` and `logs/` **inside
+the web root**. For a real deployment, put them **outside** the web root and
+point the config at them instead.
+
+> The constants in `config/local.php` are `UPLOAD_DIR_LOCAL` and
+> `LOG_DIR_LOCAL` - the `_LOCAL` suffix is required. `includes/bootstrap.php`
+> only reads those two names and falls back to the in-tree directories if they
+> are not defined, so writing `UPLOAD_DIR` here has no effect and silently
+> leaves uploads and error logs inside the web root, which is the opposite of
+> what this step is for.
 
 ```php
-define('UPLOAD_DIR', '/home/YOURUSER/data/uploads');
-define('LOG_DIR',    '/home/YOURUSER/data/logs');
+define('UPLOAD_DIR_LOCAL', '/home/YOURUSER/data/uploads/');
+define('LOG_DIR_LOCAL',    '/home/YOURUSER/data/logs/');
 ```
 
-Then:
+Absolute paths. A trailing slash is fine either way - every consumer
+`rtrim()`s the value before joining. Then:
 
 ```bash
 mkdir -p /home/YOURUSER/data/uploads /home/YOURUSER/data/logs
@@ -71,6 +79,28 @@ chmod 750 /home/YOURUSER/data/uploads
 chmod 750 /home/YOURUSER/data/logs
 chown -R YOURUSER:YOURUSER /home/YOURUSER/data
 ```
+
+If PHP cannot write there, `750` may be too strict for your host; `775` is the
+usual fallback on shared hosting. Verify by loading any page that logs an
+error and checking that the file appears in the new directory.
+
+---
+
+## Upgrading an existing installation
+
+If your database was created before per-student lesson progress existed, apply
+the migration:
+
+```bash
+mysql -u DB_USER -p DB_NAME < database/migrations/001_lesson_progress.sql
+```
+
+This creates the `lesson_progress` table and nothing else. The statement uses
+`CREATE TABLE IF NOT EXISTS`, so re-running it against a database that already
+has the table is a no-op.
+
+A fresh install needs no migration: both `database/schema.sql` and
+`database/schema-only.sql` already include `lesson_progress`.
 
 ---
 
@@ -163,13 +193,14 @@ does not require a session and never prints HTML.
 
 ## Database schema
 
-12 tables:
+13 tables:
 
 - `users` - profiles, credential hashes, roles (`student`, `instructor`, `admin`)
 - `courses` - metadata, codes, capacity, dates, publication status
 - `enrollments` - student enrollments and approval status
 - `modules` - course modules and ordering
 - `lessons` - lesson content, type, duration
+- `lesson_progress` - per-student lesson completion, one row per student/lesson
 - `assignments` - due date, points, accepted formats, size limits
 - `submissions` - student work, stored file reference, grade, feedback
 - `rubrics` - criteria, weights, maximum scores
@@ -178,16 +209,50 @@ does not require a session and never prints HTML.
 - `forums` - course discussion forums
 - `forum_posts` - threads and replies
 
+`peer_reviews.status` is `ENUM('in_progress','completed')`. A review row is
+created as `in_progress` the moment it is assigned, so `in_progress` means
+"assigned and not yet finished".
+
+---
+
+## Verifying a change
+
+Two portable checks need no database and no dependencies:
+
+```powershell
+# PHP syntax across every file in the tree
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\lint.ps1
+
+# Security and correctness heuristics
+php tools/audit.php
+```
+
+`tools/lint.ps1` looks for PHP via `$env:PHP_BIN`, then `php` on the PATH, then
+the usual Windows install locations, and prints how to point it at a binary if
+it finds none:
+
+```powershell
+$env:PHP_BIN = 'C:\path\to\php.exe'
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\lint.ps1
+```
+
+`tools/audit.php` reports escaping, CSRF coverage, prepared-statement usage,
+GET-triggered writes and a few schema/code mismatches. Neither replaces
+running the application: they will not catch a wrong query, a missing
+`lesson_progress` table, or anything that depends on real data.
+
 ---
 
 ## Repository layout
 
 ```
 .htaccess              Apache hardening rules
+assets/                app.css, app.js (web-blocked config is in config/)
 config/                database class + local.php (git-ignored, web-blocked)
 includes/              bootstrap, auth, functions, helpers
 install/               create_admin.php (CLI only)
-database/              schema-only.sql (no demo data)
+database/              schema.sql, schema-only.sql, migrations/
+tools/                 lint.ps1, audit.php
 cron/                  auto_assign_reviews.php
 uploads/               stored submissions (web-blocked)
 logs/                  application logs (web-blocked)

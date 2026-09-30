@@ -103,7 +103,7 @@ if (!function_exists('csrf_fail')) {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Request Blocked</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+            <link href="<?php echo e_attr(asset_url('vendor/bootstrap/bootstrap.min.css')); ?>" rel="stylesheet">
             <link href="<?php echo e_attr(asset_url('css/app.css')); ?>" rel="stylesheet">
         </head>
         <body>
@@ -1139,8 +1139,10 @@ if (!function_exists('ui_status_badge')) {
             'in_progress' => ['In progress', 'warning', 'fa-spinner'],
             'not_started' => ['Not started', 'neutral', 'fa-circle'],
             'completed' => ['Completed', 'success', 'fa-circle-check'],
-            // peer reviews
-            'assigned'  => ['Assigned', 'info', 'fa-user-check'],
+            // Review-adjacent vocabulary. peer_reviews.status is only
+            // ENUM('in_progress','completed') today; the rest are labels for
+            // review-request states that other schemas use, kept here so the
+            // map stays in one place if they are introduced.
             'accepted'  => ['Accepted', 'info', 'fa-inbox'],
             'declined'  => ['Declined', 'neutral', 'fa-inbox'],
             'overdue'   => ['Overdue', 'danger', 'fa-triangle-exclamation'],

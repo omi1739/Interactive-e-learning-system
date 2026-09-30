@@ -140,16 +140,16 @@ function app_nav_is_active(array $item, $current_dir, $current_page) {
         })();
     </script>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-          integrity="sha384-4164ca6728e93c48c84afe5669153d385791a6893a61cb676260ebe69365c93d9b4635e1d093218d8ea15be00b130207"
-          crossorigin="anonymous">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
-          integrity="sha384-3cf21910660cd6ff33a793f2ed48c56fbf52e7c51ea822fda5856754f511284aaf8a83d139a54024a28bcef1f6ac39c8"
-          crossorigin="anonymous" referrerpolicy="no-referrer">
+    <!--
+        Third-party assets are self-hosted under assets/vendor/ instead of a
+        public CDN. Shared hosting often cannot reach jsdelivr, cdnjs or
+        fonts.googleapis.com, and a blocked CDN previously left the entire
+        interface unstyled. asset_url() appends an mtime cache-buster, so
+        replacing a vendored file takes effect without a hard refresh.
+    -->
+    <link rel="stylesheet" href="<?php echo e_attr(asset_url('vendor/googlefonts/fonts.css')); ?>">
+    <link rel="stylesheet" href="<?php echo e_attr(asset_url('vendor/bootstrap/bootstrap.min.css')); ?>">
+    <link rel="stylesheet" href="<?php echo e_attr(asset_url('vendor/fontawesome/css/all.min.css')); ?>">
 
     <!-- Loaded last so every rule here can override Bootstrap. -->
     <link rel="stylesheet" href="<?php echo e_attr(asset_url('css/app.css')); ?>">
