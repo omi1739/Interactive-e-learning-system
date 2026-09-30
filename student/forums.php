@@ -50,18 +50,52 @@ foreach($forums_data as $forum) {
     $courses_with_forums[$course_id]['forums'][] = $forum;
 }
 
+// The dashboard links here per course ("Forums" on a course card), but this page
+// used to ignore ?course= and always listed every enrolled course. The filter
+// is applied after grouping rather than in SQL: $forums_data is already
+// restricted to approved enrollments, so filtering it in PHP cannot leak a
+// course the student is not enrolled in.
+$filter_course = intval($_GET['course'] ?? 0);
+$course_names = [];
+foreach($courses_with_forums as $cid => $group) {
+    $course_names[$cid] = $group['course_title'];
+    if($filter_course && $cid !== $filter_course) {
+        unset($courses_with_forums[$cid]);
+    }
+}
+$visible_forums = 0;
+foreach($courses_with_forums as $group) {
+    $visible_forums += count($group['forums']);
+}
+
 require_once '../includes/header.php';
 ?>
 
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
     <h1 class="h2">Discussion Forums</h1>
     <div class="btn-toolbar mb-2 mb-md-0">
-        <span class="badge bg-primary"><?php echo count($forums_data); ?> forums</span>
+        <span class="badge bg-primary"><?php echo $visible_forums; ?> forums</span>
     </div>
 </div>
 
 <div class="row">
     <div class="col-12">
+        <?php if(count($course_names) > 1): ?>
+            <div class="mb-3 d-flex flex-wrap align-items-center gap-2">
+                <span class="text-muted small">Course:</span>
+                <a href="forums.php"
+                   class="btn btn-sm <?php echo $filter_course ? 'btn-outline-secondary' : 'btn-secondary'; ?>">
+                    All
+                </a>
+                <?php foreach($course_names as $cid => $cname): ?>
+                    <a href="forums.php?course=<?php echo (int)$cid; ?>"
+                       class="btn btn-sm <?php echo $filter_course === (int)$cid ? 'btn-secondary' : 'btn-outline-secondary'; ?>">
+                        <?php echo e($cname); ?>
+                    </a>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+
         <?php if(count($courses_with_forums) > 0): ?>
             <?php foreach($courses_with_forums as $course_id => $course): ?>
                 <div class="card mb-4">
@@ -141,11 +175,21 @@ require_once '../includes/header.php';
                 <i class="fas fa-comments fa-4x text-muted mb-4"></i>
                 <h3 class="text-muted">No Forums Available</h3>
                 <p class="text-muted">
-                    You are not enrolled in any courses with discussion forums, or forums are being set up.
+                    <?php if($filter_course): ?>
+                        This course has no discussion forums, or they are still being set up.
+                    <?php else: ?>
+                        You are not enrolled in any courses with discussion forums, or forums are being set up.
+                    <?php endif; ?>
                 </p>
                 <div class="mt-3">
-                    <a href="courses.php" class="btn btn-primary">Browse Courses</a>
-                    <a href="../instructor/courses.php" class="btn btn-outline-secondary">Contact Instructor</a>
+                    <?php if($filter_course): ?>
+                        <a href="forums.php" class="btn btn-primary">View All Forums</a>
+                    <?php else: ?>
+                        <?php // Previously linked to ../instructor/courses.php as "Contact
+                              // Instructor", but that page role-guards non-instructors
+                              // away, so the button was a dead end for every student. ?>
+                        <a href="courses.php" class="btn btn-primary">Browse Courses</a>
+                    <?php endif; ?>
                 </div>
             </div>
         <?php endif; ?>
@@ -153,37 +197,49 @@ require_once '../includes/header.php';
 </div>
 
 <!-- Quick Stats -->
-<?php if(count($forums_data) > 0): ?>
+<?php if($visible_forums > 0): ?>
+<?php
+// Counted from the filtered group so these never disagree with the table
+// above when ?course= is set.
+$shown_forums = [];
+foreach($courses_with_forums as $group) {
+    foreach($group['forums'] as $f) {
+        $shown_forums[] = $f;
+    }
+}
+$total_posts = array_sum(array_map('intval', array_column($shown_forums, 'post_count')));
+$active_forums = count(array_filter($shown_forums, static fn($f) => !$f['is_locked']));
+?>
 <div class="row mt-4">
     <div class="col-md-3">
         <div class="card text-white bg-primary">
             <div class="card-body text-center">
                 <h4><?php echo count($courses_with_forums); ?></h4>
-                <p>Courses with Forums</p>
+                <p class="mb-0"><?php echo $filter_course ? 'Course' : 'Courses with Forums'; ?></p>
             </div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card text-white bg-success">
             <div class="card-body text-center">
-                <h4><?php echo count($forums_data); ?></h4>
-                <p>Total Forums</p>
+                <h4><?php echo $visible_forums; ?></h4>
+                <p class="mb-0">Total Forums</p>
             </div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card text-white bg-info">
             <div class="card-body text-center">
-                <h4><?php echo array_sum(array_column($forums_data, 'post_count')); ?></h4>
-                <p>Total Posts</p>
+                <h4><?php echo $total_posts; ?></h4>
+                <p class="mb-0">Total Posts</p>
             </div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card text-white bg-warning">
             <div class="card-body text-center">
-                <h4><?php echo count(array_filter($forums_data, function($f) { return !$f['is_locked']; })); ?></h4>
-                <p>Active Forums</p>
+                <h4><?php echo $active_forums; ?></h4>
+                <p class="mb-0">Open Forums</p>
             </div>
         </div>
     </div>
